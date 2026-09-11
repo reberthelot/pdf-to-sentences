@@ -5,10 +5,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import httpx
-from fastapi import FastAPI, File, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+import backend
 
 from frontend_service import (
     DEFAULT_SERVICE_URL,
@@ -38,12 +39,23 @@ if STATIC_DIR.exists():
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    """Render the single-page HTML application."""
+    """Render the single-page HTML application and reset operational metrics."""
+    await metrics.reset()
+    recorded_jobs.clear()
+
     if not HTML_TEMPLATE_PATH.exists():
         return "<h3>Error: template/index.html not found.</h3>"
 
     content = HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
     return content.replace("{SERVICE_URL}", DEFAULT_SERVICE_URL)
+
+
+@app.post("/api/metrics/reset")
+async def api_metrics_reset() -> Dict[str, Any]:
+    """Explicitly reset operational metrics."""
+    await metrics.reset()
+    recorded_jobs.clear()
+    return await metrics.snapshot()
 
 
 @app.get("/api/metrics")
@@ -117,14 +129,22 @@ async def api_extract(pdf_file: UploadFile = File(...)) -> JSONResponse:
 
 @app.post("/api/selftest")
 async def api_selftest() -> Dict[str, Any]:
-    """Run self-test validation on sample PDFs."""
-    return await run_selftest()
+    """Run self-test validation on sample PDFs and record in operational metrics."""
+    return await run_selftest(service_url=DEFAULT_SERVICE_URL, metrics_tracker=metrics)
 
 
 @app.post("/api/jobs/submit")
-async def api_submit_job(pdf_file: UploadFile = File(...)) -> JSONResponse:
+async def api_submit_job(
+    background_tasks: BackgroundTasks,
+    pdf_file: UploadFile = File(...),
+) -> JSONResponse:
     """Submit PDF to backend asynchronous extraction job queue."""
     try:
+        # If running in unified single-process mode, call backend.submit_job directly
+        if "localhost:8000" in DEFAULT_SERVICE_URL or "127.0.0.1:8000" in DEFAULT_SERVICE_URL:
+            job_resp = await backend.submit_job(background_tasks, pdf_file)
+            return JSONResponse(content=job_resp.model_dump())
+
         pdf_bytes = await pdf_file.read()
         if not pdf_bytes:
             return JSONResponse(status_code=400, content={"error": "File is empty."})
@@ -138,14 +158,38 @@ async def api_submit_job(pdf_file: UploadFile = File(...)) -> JSONResponse:
         )
 
 
+recorded_jobs: set[str] = set()
+
+
 @app.get("/api/jobs/{job_id}")
 async def api_job_status(job_id: str) -> JSONResponse:
     """Query progress and result for an asynchronous extraction job."""
     try:
-        data = await get_job_status_service(job_id, DEFAULT_SERVICE_URL)
+        if ("localhost:8000" in DEFAULT_SERVICE_URL or "127.0.0.1:8000" in DEFAULT_SERVICE_URL) and job_id in backend.jobs_db:
+            data = backend.jobs_db[job_id].model_dump()
+        else:
+            data = await get_job_status_service(job_id, DEFAULT_SERVICE_URL)
+
+        # Once a job reaches terminal state, record it into operational metrics once
+        status = data.get("status")
+        if status in ("completed", "failed") and job_id not in recorded_jobs:
+            recorded_jobs.add(job_id)
+            if status == "completed":
+                result = data.get("result") or {}
+                latency_ms = result.get("processing_time_ms")
+                if latency_ms is None:
+                    created = data.get("created_at")
+                    updated = data.get("updated_at")
+                    latency_ms = (updated - created) * 1000.0 if created and updated else 0.0
+                await metrics.record_success(latency_ms=float(latency_ms))
+            elif status == "failed":
+                err = data.get("error") or "Background job extraction failed."
+                await metrics.record_failure(latency_ms=None, error=err)
+
         return JSONResponse(content=data)
     except Exception as exc:
         return JSONResponse(
             status_code=500, content={"error": f"Failed to query job status: {exc}"}
         )
+
 

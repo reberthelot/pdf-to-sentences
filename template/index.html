@@ -37,7 +37,6 @@
           <div class="row">
             <input id="filterBox" type="text" placeholder="Optional: filter preview by substring (client-side)" style="min-width: 260px;" />
             <span class="pill">Preview limit: <b id="previewLimit">200</b></span>
-            <span class="pill">Timer: <b id="timerDisplay">—</b></span>
             <span class="pill">Latency: <b id="latency">—</b></span>
             <span class="pill">Engine: <b id="engineUsed">—</b></span>
             <span class="pill">Returned: <b id="returnedCount">—</b></span>
@@ -74,14 +73,14 @@
         <pre id="selftestOut">Self-test results will appear here.</pre>
 
         <h2 style="margin-top:14px;">3) Operational metrics</h2>
-        <div class="meta">In-memory performance counters (reset on process restart).</div>
+        <div class="meta">In-memory performance counters (reset on page reload).</div>
 
         <div class="kpi">
           <div class="box"><div class="label">Total requests</div><div class="value" id="m_total">—</div></div>
           <div class="box"><div class="label">Successful</div><div class="value" id="m_ok">—</div></div>
           <div class="box"><div class="label">Failed</div><div class="value" id="m_fail">—</div></div>
-          <div class="box"><div class="label">Avg latency (ms)</div><div class="value" id="m_avg">—</div></div>
-          <div class="box"><div class="label">Last latency (ms)</div><div class="value" id="m_last">—</div></div>
+          <div class="box"><div class="label">Avg latency</div><div class="value" id="m_avg">—</div></div>
+          <div class="box"><div class="label">Last latency</div><div class="value" id="m_last">—</div></div>
           <div class="box"><div class="label">Last error</div><div class="value" id="m_err" style="font-size:12px;">—</div></div>
         </div>
       </section>

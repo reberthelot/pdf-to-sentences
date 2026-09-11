@@ -49,6 +49,16 @@ class Metrics:
             self.last_latency_ms = latency_ms
             self.last_error = error
 
+    async def reset(self) -> None:
+        async with self.lock:
+            self.total_requests = 0
+            self.success_requests = 0
+            self.failed_requests = 0
+            self.last_latency_ms = None
+            self.latency_ms_sum = 0.0
+            self.latency_ms_count = 0
+            self.last_error = None
+
     async def snapshot(self, service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]:
         async with self.lock:
             avg = (
@@ -172,8 +182,11 @@ async def inspect_pdf_service(
     raise ValueError(f"Inspect failed with status {resp.status_code}: {resp.text[:200]}")
 
 
-async def run_selftest(service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]:
-    """Execute validation tests using reference sample PDFs."""
+async def run_selftest(
+    service_url: str = DEFAULT_SERVICE_URL,
+    metrics_tracker: Optional[Metrics] = None,
+) -> Dict[str, Any]:
+    """Execute validation tests using reference sample PDFs and update operational metrics."""
     results: List[Dict[str, Any]] = []
     passed = 0
 
@@ -186,6 +199,11 @@ async def run_selftest(service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]
             path = APP_DIR / "examples" / fname
 
         if not path.exists():
+            if metrics_tracker:
+                await metrics_tracker.record_failure(
+                    latency_ms=None,
+                    error=f"Sample PDF '{fname}' not found in app or examples directory.",
+                )
             results.append(
                 {
                     "filename": fname,
@@ -203,6 +221,10 @@ async def run_selftest(service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]
             sentences, latency_ms, meta = await call_sentence_service(
                 pdf_bytes, fname, service_url=service_url
             )
+
+            # OCR / service extraction succeeded (valid HTTP 200 with extracted sentences)
+            if metrics_tracker:
+                await metrics_tracker.record_success(latency_ms=latency_ms)
 
             returned_set = set(sentences)
             missing = [s for s in expected if s not in returned_set]
@@ -228,15 +250,21 @@ async def run_selftest(service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]
                 }
             )
         except Exception as ex:
+            err_msg = (
+                pedagogic_http_error(ex, service_url)
+                if isinstance(ex, httpx.HTTPError)
+                else str(ex)
+            )
+            if metrics_tracker:
+                await metrics_tracker.record_failure(
+                    latency_ms=None,
+                    error=err_msg,
+                )
             results.append(
                 {
                     "filename": fname,
                     "ok": False,
-                    "error": (
-                        pedagogic_http_error(ex, service_url)
-                        if isinstance(ex, httpx.HTTPError)
-                        else str(ex)
-                    ),
+                    "error": err_msg,
                     "missing_sentences": expected,
                     "latency_ms": None,
                     "num_returned_sentences": None,

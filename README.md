@@ -184,10 +184,76 @@ The application will be accessible at [http://localhost:8000](http://localhost:8
   }
   ```
 
-### 3. Asynchronous Job Processing (For Large Scans)
-For multi-page scanned documents that take extended processing time on CPU:
-- **Submit Job**: `POST /v1/jobs/submit` $\to$ returns `{"job_id": "...", "status": "pending", "total_pages": 4, "estimated_seconds": 60.0}`
-- **Query Job Status**: `GET /v1/jobs/{job_id}` $\to$ returns current status (`processing`, `completed`), progress fraction (`0.0` to `1.0`), current page, and final sentences upon completion.
+### 3. Asynchronous Job Processing (For Large Scans & Non-Blocking UI)
+For multi-page scanned documents or background batching, avoid HTTP client timeouts (504 Gateway Timeout) by using background job execution:
+
+#### Submit Job
+- **Endpoint**: `POST /v1/jobs/submit` (or via frontend proxy `POST /api/jobs/submit`)
+- **Payload**: `multipart/form-data` with field `pdf_file`
+- **Response**:
+  ```json
+  {
+    "job_id": "cf525c49-a099-4738-9708-d5dde3fedd25",
+    "status": "pending",
+    "total_pages": 13,
+    "estimated_seconds": 0.05
+  }
+  ```
+
+#### Query Job Status & Progress
+- **Endpoint**: `GET /v1/jobs/{job_id}` (or via frontend proxy `GET /api/jobs/{job_id}`)
+- **Response (Processing)**:
+  ```json
+  {
+    "job_id": "cf525c49-a099-4738-9708-d5dde3fedd25",
+    "filename": "document.pdf",
+    "status": "processing",
+    "progress": 0.40,
+    "current_page": 2,
+    "total_pages": 5,
+    "message": "Processing page 2 of 5 with RapidOCR ONNX...",
+    "created_at": 1789145728.16,
+    "updated_at": 1789145740.50,
+    "result": null,
+    "error": null
+  }
+  ```
+- **Response (Completed)**:
+  ```json
+  {
+    "job_id": "cf525c49-a099-4738-9708-d5dde3fedd25",
+    "filename": "document.pdf",
+    "status": "completed",
+    "progress": 1.0,
+    "current_page": 5,
+    "total_pages": 5,
+    "message": "Extraction completed successfully via PP-OCRv5 Mobile RapidOCR ONNX.",
+    "result": {
+      "sentences": ["First extracted sentence.", "Second sentence."],
+      "method": "rapidocr_onnx",
+      "page_count": 5,
+      "processing_time_ms": 46290.9
+    },
+    "created_at": 1789145728.16,
+    "updated_at": 1789145774.45,
+    "error": null
+  }
+  ```
+
+---
+
+## Interactive Web Dashboard Features
+
+The web frontend (`http://localhost:8000`) provides an integrated dual-mode workspace:
+
+1. **Synchronous Extraction**: Click **Extract sentences** for instant digital extraction or single-page scans with live stopwatch and preview.
+2. **Asynchronous Jobs Table**: Click **Extract sentences (asynchrone)** to offload tasks to the background worker.
+   - **Compact Single-Row Table**: Displays document name, short Job ID, frozen elapsed duration, page count (`current / total`), status pill, progress bar percentage, and OCR engine.
+   - **Color-Coded Status**: Green for completed, amber/orange for pending/processing, and red for failed jobs.
+   - **Expandable Drawer**: Right-aligned `View ▼` / `Hide ▲` toggle reveals the complete Job ID, status log, latency, and full extracted sentences with a one-click `.txt` download button.
+   - **Stable Scrolling**: Scroll position is preserved inside text drawers during background polling, preventing abrupt page jumps.
+3. **Automated Self-Test**: Validates baseline sentence segmentation against reference benchmark PDFs directly from the UI.
+4. **Operational KPIs**: Live request counters, success/failure ratios, and average latency tracking.
 
 ---
 
@@ -201,4 +267,6 @@ pytest test_main.py -v
 ### Tests Covered
 1. **`test_extract_sentences_studyboard`**: Validates instantaneous Fast-Path extraction on digital PDF (`studyboard.pdf`).
 2. **`test_extract_sentences_assignment_spec`**: Validates sentence segmentation and accuracy against assignment benchmark (`2303.15133.pdf`).
-3. **UI Self-Test**: Click the **Run self-test** button in the web dashboard at `http://localhost:8000` to execute live validation directly from the browser.
+3. **`test_async_job_lifecycle`**: Validates asynchronous submission (`/v1/jobs/submit`) and polling resolution (`/v1/jobs/{job_id}`).
+4. **UI Self-Test**: Click the **Run self-test** button in the web dashboard at `http://localhost:8000` to execute live validation directly from the browser.
+

@@ -2,7 +2,6 @@
   const previewN = 200;
   const output = document.getElementById("output");
   const latencyEl = document.getElementById("latency");
-  const timerDisplay = document.getElementById("timerDisplay");
   const returnedCountEl = document.getElementById("returnedCount");
   const engineUsedEl = document.getElementById("engineUsed");
   const extractBtn = document.getElementById("extractBtn");
@@ -17,14 +16,16 @@
   const estTimeEl = document.getElementById("estTime");
 
   let lastAllSentences = null;
-  let timerInterval = null;
   let currentEstSeconds = null;
 
   function fmtMs(x) {
     if (x === null || x === undefined) return "—";
-    return Math.round(x * 10) / 10;
-    if (x < 1000) return `${Math.round(x)} ms`;
-    return `${(x / 1000).toFixed(2)} s`;
+    const num = Number(x);
+    if (isNaN(num)) return "—";
+    if (num > 100) {
+      return `${(num / 1000).toFixed(2)} s`;
+    }
+    return `${Math.round(num * 10) / 10} ms`;
   }
 
   function renderPreview(sentences) {
@@ -202,20 +203,10 @@
       if (extractBtn) extractBtn.disabled = true;
       if (downloadBtn) downloadBtn.disabled = true;
       lastAllSentences = null;
-      if (output) output.textContent = "Uploading PDF and extracting sentences via PaddleOCR...";
       if (latencyEl) latencyEl.textContent = "—";
       if (output) output.textContent = "Processing PDF and extracting sentences...";
       if (engineUsedEl) engineUsedEl.textContent = "detecting...";
       if (returnedCountEl) returnedCountEl.textContent = "—";
-
-      // Live stopwatch timer
-      const startTime = performance.now();
-      if (timerInterval) clearInterval(timerInterval);
-      timerInterval = setInterval(() => {
-        const elapsedSec = ((performance.now() - startTime) / 1000).toFixed(1);
-        const estStr = currentEstSeconds ? ` / ~${currentEstSeconds}s` : "";
-        if (timerDisplay) timerDisplay.textContent = `⏱️ ${elapsedSec}s${estStr}`;
-      }, 100);
 
       try {
         const r = await fetch("api/extract", {
@@ -224,12 +215,11 @@
         });
 
         const data = await r.json();
-        clearInterval(timerInterval);
 
         if (!r.ok) {
           const msg = data && data.error ? data.error : ("HTTP " + r.status);
           output.textContent = "Request failed.\n\n" + msg;
-          if (timerDisplay) timerDisplay.textContent = "error";
+          if (latencyEl) latencyEl.textContent = "error";
           return;
         }
 
@@ -237,15 +227,13 @@
         lastAllSentences = sentences;
 
         if (latencyEl) latencyEl.textContent = fmtMs(data.latency_ms);
-        const totalTimeStr = fmtMs(data.latency_ms);
-        if (timerDisplay) timerDisplay.textContent = `✅ ${totalTimeStr}`;
         if (returnedCountEl) returnedCountEl.textContent = String(sentences.length);
 
         if (engineUsedEl) {
           if (data.method === "fast_path") {
-            engineUsedEl.innerHTML = '<span class="ok">⚡ Fast-Path</span>';
+            engineUsedEl.innerHTML = '<span class="ok">Fast-Path Extraction</span>';
           } else if (data.method === "rapidocr_onnx" || data.method === "paddleocr_onnx" || data.method === "paddleocr") {
-            engineUsedEl.innerHTML = '<span class="bad">👁️ RapidOCR ONNX</span>';
+            engineUsedEl.innerHTML = '<span class="bad">RapidOCR ONNX</span>';
           } else {
             engineUsedEl.textContent = data.method || "default";
           }
@@ -267,9 +255,8 @@
           };
         }
       } catch (e) {
-        clearInterval(timerInterval);
         if (output) output.textContent = "Unexpected frontend error.\n\n" + String(e);
-        if (timerDisplay) timerDisplay.textContent = "failed";
+        if (latencyEl) latencyEl.textContent = "failed";
       } finally {
         if (extractBtn) extractBtn.disabled = false;
         refreshMetrics();
@@ -462,6 +449,7 @@
 
     if (stateChanged) {
       updateJobsListUI();
+      refreshMetrics();
     }
     return hasActiveJobs;
   }

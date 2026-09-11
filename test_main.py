@@ -52,3 +52,54 @@ def test_extract_sentences_assignment_spec():
     sentence = "How language should best be handled is not clear."
     assert any(sentence in s for s in data["sentences"])
 
+
+def test_async_job_lifecycle():
+    """Verify end-to-end background job submission and status polling."""
+    pdf_path = _get_pdf_path("studyboard.pdf")
+
+    with open(pdf_path, "rb") as f:
+        files = {"pdf_file": ("studyboard.pdf", f, "application/pdf")}
+        submit_resp = client.post("/v1/jobs/submit", files=files)
+
+    assert submit_resp.status_code == 200, submit_resp.text
+    submit_data = submit_resp.json()
+    assert "job_id" in submit_data
+    assert submit_data["status"] == "pending"
+
+    job_id = submit_data["job_id"]
+    status_resp = client.get(f"/v1/jobs/{job_id}")
+    assert status_resp.status_code == 200, status_resp.text
+    status_data = status_resp.json()
+    assert status_data["job_id"] == job_id
+    assert status_data["status"] in ("pending", "processing", "completed")
+
+
+def test_metrics_updated_on_async_job():
+    """Verify that operational metrics record completed asynchronous jobs."""
+    metrics_before = client.get("/ui/api/metrics").json()
+    total_before = metrics_before.get("total_requests", 0)
+
+    pdf_path = _get_pdf_path("studyboard.pdf")
+    with open(pdf_path, "rb") as f:
+        files = {"pdf_file": ("studyboard.pdf", f, "application/pdf")}
+        submit_resp = client.post("/ui/api/jobs/submit", files=files)
+
+    assert submit_resp.status_code == 200, submit_resp.text
+    job_id = submit_resp.json()["job_id"]
+
+    # Poll via /ui/api/jobs/{job_id} until completed (fast-path completes in ms)
+    import time
+    for _ in range(20):
+        status_resp = client.get(f"/ui/api/jobs/{job_id}")
+        assert status_resp.status_code == 200
+        if status_resp.json()["status"] == "completed":
+            break
+        time.sleep(0.05)
+
+    metrics_after = client.get("/ui/api/metrics").json()
+    total_after = metrics_after.get("total_requests", 0)
+    assert total_after >= total_before + 1
+    assert metrics_after.get("success_requests", 0) >= 1
+
+
+
