@@ -1,0 +1,9 @@
+services:
+  pdf-to-sentences:
+    image: pdf-to-sentences
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    ports:
+      - "8000:8000"
+

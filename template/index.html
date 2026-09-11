@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF → Sentences (DTU Frontend)</title>
+  <link rel="stylesheet" href="static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>PDF → Sentences (DTU Frontend Test App)</h1>
+    <div class="sub">Uploads a PDF and calls an independently-built service at <span class="pill" id="svcUrl">{SERVICE_URL}</span></div>
+    <div class="sub">High-performance extraction (Fast-Path vector text &amp; PaddleOCR fallback) at <span class="pill" id="svcUrl">{SERVICE_URL}</span></div>
+    <div class="sub">High-performance extraction (Fast-Path vector text &amp; ONNX-accelerated PaddleOCR fallback) at <span class="pill" id="svcUrl">{SERVICE_URL}</span></div>
+  </header>
+
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h2>1) Upload a PDF and extract sentences</h2>
+        <div class="meta">
+          The PDF is forwarded to the external service endpoint. This app measures round-trip latency and shows a preview.
+          Automatically detects vector text for instant extraction (~0.1s) and falls back to PaddleOCR for scanned pages.
+        </div>
+
+        <form id="uploadForm">
+          <div class="row">
+            <input id="pdfFile" type="file" accept="application/pdf" required />
+            <button id="extractBtn" class="btn" type="submit">Extract sentences</button>
+            <button id="downloadBtn" class="btn secondary" type="button" disabled>Download all as .txt</button>
+          </div>
+          
+          <div class="row" id="fileInfoRow" style="display: none;">
+            <span class="pill">Pages: <b id="pageCount">—</b></span>
+            <span class="pill">Layer: <b id="docType">—</b></span>
+            <span class="pill">Estimated time: <b id="estTime">—</b></span>
+          </div>
+
+          <div class="row">
+            <input id="filterBox" type="text" placeholder="Optional: filter preview by substring (client-side)" style="min-width: 320px;" />
+            <span class="pill">Preview limit: <b id="previewLimit">200</b> sentences</span>
+            <span class="pill">Latency: <b id="latency">—</b></span>
+            <input id="filterBox" type="text" placeholder="Optional: filter preview by substring (client-side)" style="min-width: 280px;" />
+            <span class="pill">Preview limit: <b id="previewLimit">200</b></span>
+            <span class="pill">Timer: <b id="timerDisplay">—</b></span>
+            <span class="pill">Latency: <b id="latency">—</b></span>
+            <span class="pill">Engine: <b id="engineUsed">—</b></span>
+            <span class="pill">Returned: <b id="returnedCount">—</b></span>
+          </div>
+        </form>
+
+        <details open>
+          <summary>Output preview</summary>
+          <div class="small">Shows the first N sentences (after optional filter). Use the download button to get all sentences.</div>
+          <pre id="output">No results yet.</pre>
+        </details>
+
+        <details>
+          <summary>Troubleshooting tips</summary>
+          <pre id="tips">• Ensure the service is running and reachable.
+• Current configured URL: {SERVICE_URL}
+• You can change it with environment variable SENTENCE_SERVICE_URL.
+• If large PDFs time out, increase SERVICE_TIMEOUT_SECONDS.</pre>
+          <summary>Troubleshooting &amp; Engine tips</summary>
+          <pre id="tips">• Configured URL: {SERVICE_URL}
+• Fast-Path (vector text): Instantaneous (~0.05s/page).
+• PaddleOCR fallback: Computer vision for scanned images (~12s/page on CPU).
+• Increase SERVICE_TIMEOUT_SECONDS if uploading large scanned PDFs.</pre>
+• Fast-Path (vector text layer): Instantaneous (~0.02s/page).
+• PP-OCRv5 Mobile ONNX: Accelerated CPU vision for scanned documents (~15s/page on CPU).
+• Line baseline merging ensures coherent reading order for typewriter and scanned texts.
+• Increase SERVICE_TIMEOUT_SECONDS if uploading large multi-page scans.</pre>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>2) Automatic self-test (sample PDFs)</h2>
+        <div class="meta">
+          Tests whether specific sentences are present in the service output for PDFs located next to this app.
+          Validates that expected sentences are found in both digital and benchmark PDFs.
+        </div>
+
+        <div class="row">
+          <button id="selftestBtn" class="btn" type="button">Run self-test</button>
+          <span class="pill">Status: <b id="selftestStatus">not run</b></span>
+        </div>
+
+        <pre id="selftestOut">Self-test results will appear here.</pre>
+
+        <h2 style="margin-top:14px;">3) Operational metrics</h2>
+        <div class="meta">In-memory counters for this frontend process (reset on restart).</div>
+        <div class="meta">In-memory performance counters (reset on process restart).</div>
+
+        <div class="kpi">
+          <div class="box"><div class="label">Total requests</div><div class="value" id="m_total">—</div></div>
+          <div class="box"><div class="label">Successful</div><div class="value" id="m_ok">—</div></div>
+          <div class="box"><div class="label">Failed</div><div class="value" id="m_fail">—</div></div>
+          <div class="box"><div class="label">Avg latency (ms)</div><div class="value" id="m_avg">—</div></div>
+          <div class="box"><div class="label">Last latency (ms)</div><div class="value" id="m_last">—</div></div>
+          <div class="box"><div class="label">Last error</div><div class="value" id="m_err" style="font-size:12px;">—</div></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="static/app.js"></script>
+</body>
+</html>
