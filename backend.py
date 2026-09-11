@@ -200,6 +200,7 @@ class JobInfo(BaseModel):
     """Asynchronous background job progress and result model."""
 
     job_id: str
+    filename: Optional[str] = None
     status: JobStatus
     progress: float = 0.0
     current_page: int = 0
@@ -569,6 +570,7 @@ async def submit_job(
     now = time.time()
     job_info = JobInfo(
         job_id=job_id,
+        filename=pdf_file.filename,
         status=JobStatus.PENDING,
         progress=0.0,
         current_page=0,

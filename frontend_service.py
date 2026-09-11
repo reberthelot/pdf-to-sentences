@@ -249,3 +249,39 @@ async def run_selftest(service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]
         "total": len(SELFTEST_DATASET),
         "results": results,
     }
+
+
+async def submit_job_service(
+    pdf_bytes: bytes, filename: str, service_url: str = DEFAULT_SERVICE_URL
+) -> Dict[str, Any]:
+    """Submit a PDF file to the backend asynchronous job queue."""
+    submit_url = service_url.replace("/v1/extract-sentences", "/v1/jobs/submit")
+    timeout = httpx.Timeout(30.0, connect=CONNECT_TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        files = {"pdf_file": (filename, pdf_bytes, "application/pdf")}
+        resp = await client.post(submit_url, files=files)
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Job submission failed with status {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+
+
+async def get_job_status_service(
+    job_id: str, service_url: str = DEFAULT_SERVICE_URL
+) -> Dict[str, Any]:
+    """Query progress status and result of a background job."""
+    status_url = service_url.replace("/v1/extract-sentences", f"/v1/jobs/{job_id}")
+    timeout = httpx.Timeout(10.0, connect=CONNECT_TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(status_url)
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Job status query failed with status {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+

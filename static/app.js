@@ -277,6 +277,270 @@
     });
   }
 
+  // --- Asynchronous Jobs Management ---
+  const extractAsyncBtn = document.getElementById("extractAsyncBtn");
+  const jobsContainer = document.getElementById("jobsContainer");
+  const jobsCountBadge = document.getElementById("jobsCountBadge");
+  const trackedJobs = new Map(); // job_id -> { id, filename, postTime, endTime, status, progress, currentPage, totalPages, message, result, error, expanded }
+  let jobsPollInterval = null;
+
+  function updateJobsListUI() {
+    if (!jobsContainer) return;
+
+    if (trackedJobs.size === 0) {
+      jobsContainer.innerHTML = `
+        <div class="small" id="noJobsMsg" style="padding: 12px; color: var(--muted); text-align: center; background: white; border: 1px dashed var(--border); border-radius: 8px;">
+          No asynchronous jobs submitted yet. Click <b>"Extract sentences (asynchrone)"</b> to start one.
+        </div>`;
+      if (jobsCountBadge) jobsCountBadge.textContent = "0 job(s)";
+      return;
+    }
+
+    if (jobsCountBadge) jobsCountBadge.textContent = `${trackedJobs.size} job(s)`;
+
+    // Save scroll position of expanded pre blocks if any
+    const scrollMap = new Map();
+    const preEls = jobsContainer.querySelectorAll("pre[data-job-pre]");
+    preEls.forEach(pre => {
+      scrollMap.set(pre.getAttribute("data-job-pre"), pre.scrollTop);
+    });
+
+    const now = Date.now();
+    const sortedJobs = Array.from(trackedJobs.values()).sort((a, b) => b.postTime - a.postTime);
+
+    let html = `
+      <table class="jobs-table">
+        <thead>
+          <tr>
+            <th>Document</th>
+            <th>Job ID</th>
+            <th>Duration</th>
+            <th>Pages</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Engine</th>
+            <th style="text-align: right;">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+    `;
+
+    for (const job of sortedJobs) {
+      // Freezes timer when job reaches completed or failed
+      const endTimestamp = job.endTime || (job.status === "completed" || job.status === "failed" ? (job.updatedAt ? job.updatedAt * 1000 : now) : now);
+      const elapsedSec = Math.max(0, Math.floor((endTimestamp - job.postTime) / 1000));
+      const elapsedStr = elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s`;
+      const pct = Math.round((job.progress || 0) * 100);
+
+      let statusPillClass = "status-pending";
+      if (job.status === "processing") statusPillClass = "status-processing";
+      else if (job.status === "completed") statusPillClass = "status-completed";
+      else if (job.status === "failed") statusPillClass = "status-failed";
+
+      const engineName = (job.result && job.result.method) ? job.result.method : "—";
+      const isExpanded = !!job.expanded;
+      const toggleLabel = isExpanded ? "Hide ▲" : "View ▼";
+
+      html += `
+        <tr class="job-row" id="row-job-${job.id}">
+          <td class="job-filename-cell" title="${job.filename || 'Document'}">${job.filename || 'Document'}</td>
+          <td><code style="font-size: 11px;">${job.id.slice(0, 8)}...</code></td>
+          <td style="color: var(--muted);">${elapsedStr}</td>
+          <td>${job.currentPage || 0} / ${job.totalPages || '—'}</td>
+          <td><span class="job-status-pill ${statusPillClass}">${job.status}</span></td>
+          <td style="min-width: 100px;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <div style="flex:1; height:6px; background:#eee; border-radius:3px; overflow:hidden;">
+                <div style="height:100%; width:${pct}%; background:${job.status === 'completed' ? 'var(--ok)' : (job.status === 'failed' ? 'var(--bad)' : '#b25e00')};"></div>
+              </div>
+              <span style="font-size:11px; font-weight:600;">${pct}%</span>
+            </div>
+          </td>
+          <td style="font-size: 11.5px; color: var(--muted);">${engineName}</td>
+          <td style="text-align: right;">
+            <button class="job-toggle-btn" onclick="window.toggleJobDrawer('${job.id}')">${toggleLabel}</button>
+          </td>
+        </tr>
+      `;
+
+      if (isExpanded) {
+        html += `
+          <tr id="drawer-job-${job.id}">
+            <td colspan="8" class="job-drawer-cell">
+              <div class="job-drawer-content">
+                <div class="job-drawer-meta">
+                  <span><b>Full Job ID:</b> <code style="font-size: 11px;">${job.id}</code></span>
+                  <span><b>Message:</b> ${job.message || '—'}</span>
+                  ${job.result && job.result.processing_time_ms ? `<span><b>Processing Latency:</b> ${fmtMs(job.result.processing_time_ms)}</span>` : ''}
+                </div>
+                ${job.error ? `<div style="color:var(--bad); margin-top:6px;"><b>Error:</b> ${job.error}</div>` : ''}
+                ${job.status === "completed" && job.result && job.result.sentences ? `
+                  <div style="margin-top: 8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+                      <b>Extracted Sentences (${job.result.sentences.length}) :</b>
+                      <button class="btn secondary" style="padding: 4px 10px; font-size:11px;" onclick="window.downloadJobSentences('${job.id}', event)">Download all (.txt)</button>
+                    </div>
+                    <pre data-job-pre="${job.id}" style="max-height: 180px; margin: 0;">${job.result.sentences.map((s, i) => String(i + 1).padStart(3, ' ') + '. ' + s).join('\n')}</pre>
+                  </div>
+                ` : ''}
+              </div>
+            </td>
+          </tr>
+        `;
+      }
+    }
+
+    html += `
+        </tbody>
+      </table>
+    `;
+
+    jobsContainer.innerHTML = html;
+
+    // Restore scroll positions of open pre blocks
+    scrollMap.forEach((top, jobId) => {
+      const el = jobsContainer.querySelector(`pre[data-job-pre="${jobId}"]`);
+      if (el) el.scrollTop = top;
+    });
+  }
+
+  // Global handlers for drawer collapse/expand and download
+  window.toggleJobDrawer = function(jobId) {
+    const job = trackedJobs.get(jobId);
+    if (job) {
+      job.expanded = !job.expanded;
+      updateJobsListUI();
+    }
+  };
+
+  window.downloadJobSentences = function(jobId, ev) {
+    if (ev) ev.stopPropagation();
+    const job = trackedJobs.get(jobId);
+    if (!job || !job.result || !job.result.sentences) return;
+    const url = makeTxtDownload(job.result.sentences);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = (job.filename.replace(/\.pdf$/i, "") || "job") + "_sentences.txt";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+  };
+
+  async function pollTrackedJobs() {
+    let hasActiveJobs = false;
+    let stateChanged = false;
+
+    for (const [jobId, job] of trackedJobs.entries()) {
+      if (job.status === "completed" || job.status === "failed") {
+        continue;
+      }
+      hasActiveJobs = true;
+
+      try {
+        const resp = await fetch(`api/jobs/${jobId}`);
+        if (!resp.ok) continue;
+        const data = await resp.json();
+
+        job.status = data.status;
+        job.progress = data.progress;
+        job.currentPage = data.current_page;
+        job.totalPages = data.total_pages;
+        job.message = data.message;
+        job.result = data.result;
+        job.error = data.error;
+        if (data.updated_at) job.updatedAt = data.updated_at;
+
+        if (data.status === "completed" || data.status === "failed") {
+          if (!job.endTime) job.endTime = Date.now();
+        }
+        stateChanged = true;
+      } catch (e) {
+        // Ignore network polling error
+      }
+    }
+
+    if (stateChanged) {
+      updateJobsListUI();
+    }
+    return hasActiveJobs;
+  }
+
+  function startJobsPolling() {
+    if (jobsPollInterval) return;
+    jobsPollInterval = setInterval(async () => {
+      await pollTrackedJobs();
+    }, 1000);
+  }
+
+  if (extractAsyncBtn) {
+    extractAsyncBtn.addEventListener("click", async () => {
+      const fileInput = document.getElementById("pdfFile");
+      if (!fileInput.files || fileInput.files.length === 0) {
+        alert("Please choose a PDF file first.");
+        return;
+      }
+
+      const pdf = fileInput.files[0];
+      const fd = new FormData();
+      fd.append("pdf_file", pdf, pdf.name);
+
+      extractAsyncBtn.disabled = true;
+
+      try {
+        const resp = await fetch("api/jobs/submit", {
+          method: "POST",
+          body: fd,
+        });
+
+        if (!resp.ok) {
+          const errData = await resp.json().catch(() => ({}));
+          alert("Job submission failed: " + (errData.error || resp.statusText));
+          return;
+        }
+
+        const data = await resp.json();
+        const jobId = data.job_id;
+
+        // Register job in tracking map
+        trackedJobs.set(jobId, {
+          id: jobId,
+          filename: pdf.name,
+          postTime: Date.now(),
+          status: data.status || "pending",
+          progress: 0.0,
+          currentPage: 0,
+          totalPages: data.total_pages || 0,
+          message: "Queued for processing...",
+          result: null,
+          error: null,
+          expanded: false,
+        });
+
+        updateJobsListUI();
+        startJobsPolling();
+      } catch (err) {
+        alert("Could not submit asynchronous job: " + String(err));
+      } finally {
+        extractAsyncBtn.disabled = false;
+      }
+    });
+  }
+
+  // Periodic UI refresh for elapsed time counters (only if running jobs exist)
+  setInterval(() => {
+    let hasRunning = false;
+    for (const job of trackedJobs.values()) {
+      if (job.status !== "completed" && job.status !== "failed") {
+        hasRunning = true;
+        break;
+      }
+    }
+    if (hasRunning) {
+      updateJobsListUI();
+    }
+  }, 3000);
+
   refreshMetrics();
   setInterval(refreshMetrics, 3000);
 })();

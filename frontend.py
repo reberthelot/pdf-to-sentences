@@ -14,9 +14,11 @@ from frontend_service import (
     DEFAULT_SERVICE_URL,
     Metrics,
     call_sentence_service,
+    get_job_status_service,
     inspect_pdf_service,
     pedagogic_http_error,
     run_selftest,
+    submit_job_service,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -117,3 +119,33 @@ async def api_extract(pdf_file: UploadFile = File(...)) -> JSONResponse:
 async def api_selftest() -> Dict[str, Any]:
     """Run self-test validation on sample PDFs."""
     return await run_selftest()
+
+
+@app.post("/api/jobs/submit")
+async def api_submit_job(pdf_file: UploadFile = File(...)) -> JSONResponse:
+    """Submit PDF to backend asynchronous extraction job queue."""
+    try:
+        pdf_bytes = await pdf_file.read()
+        if not pdf_bytes:
+            return JSONResponse(status_code=400, content={"error": "File is empty."})
+        data = await submit_job_service(
+            pdf_bytes, pdf_file.filename or "uploaded.pdf", DEFAULT_SERVICE_URL
+        )
+        return JSONResponse(content=data)
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500, content={"error": f"Failed to submit async job: {exc}"}
+        )
+
+
+@app.get("/api/jobs/{job_id}")
+async def api_job_status(job_id: str) -> JSONResponse:
+    """Query progress and result for an asynchronous extraction job."""
+    try:
+        data = await get_job_status_service(job_id, DEFAULT_SERVICE_URL)
+        return JSONResponse(content=data)
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500, content={"error": f"Failed to query job status: {exc}"}
+        )
+
