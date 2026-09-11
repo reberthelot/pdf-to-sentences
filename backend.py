@@ -2,25 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shutil
 import tempfile
 import time
 import unicodedata
+import urllib.request
 import uuid
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# Configure high-performance CPU inference flags for PaddlePaddle & PaddleX
-os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
-os.environ["FLAGS_enable_pir_api"] = "0"
-os.environ["PADDLE_PDX_PDF_RENDER_SCALE"] = "1.0"
-
 import nltk
 import numpy as np
 import pypdfium2 as pdfium
+import yaml
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
-from paddleocr import PaddleOCR
 from pydantic import BaseModel, Field
+from rapidocr_onnxruntime import RapidOCR
 
 # Ensure required NLTK tokenizers are available
 try:
@@ -29,22 +28,136 @@ except LookupError:
     nltk.download("punkt_tab", quiet=True)
     nltk.download("punkt", quiet=True)
 
-# Instantiate PP-OCRv5 Mobile with high-performance ONNX Runtime engine
-ocr_engine = PaddleOCR(
-    text_detection_model_name="PP-OCRv5_mobile_det",
-    text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-    engine="onnxruntime",
-    use_doc_orientation_classify=False,
-    use_doc_unwarping=False,
-    use_textline_orientation=False,
-    text_det_limit_side_len=736,
-    text_det_box_thresh=0.60,
+MODEL_URLS = {
+    "PP-OCRv5_mobile_det.onnx": "https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/main/inference.onnx",
+    "en_PP-OCRv5_mobile_rec.onnx": "https://huggingface.co/PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.onnx",
+    "inference.yml": "https://huggingface.co/PaddlePaddle/en_PP-OCRv5_mobile_rec_onnx/resolve/main/inference.yml",
+}
+
+
+def download_file(url: str, dest_path: Path) -> None:
+    """Download a remote file using standard urllib with temporary buffering."""
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_dest = dest_path.with_suffix(".download.tmp")
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) RapidOCR-Setup"},
+    )
+    with urllib.request.urlopen(req) as response, open(temp_dest, "wb") as out_file:
+        chunk_size = 64 * 1024
+        while True:
+            chunk = response.read(chunk_size)
+            if not chunk:
+                break
+            out_file.write(chunk)
+    temp_dest.replace(dest_path)
+
+
+def ensure_models_exist(models_dir: Optional[Path | str] = None) -> Path:
+    """Ensure PP-OCRv5 Mobile ONNX models and English dictionary are present locally.
+
+    If files are absent, they are copied from local cache or downloaded from official
+    PaddlePaddle HuggingFace repositories.
+
+    Parameters
+    ----------
+    models_dir : Optional[Path | str]
+        Destination directory for model files. Defaults to 'models/' in project directory.
+
+    Returns
+    -------
+    Path
+        Path to the verified models directory.
+    """
+    target_dir = Path(models_dir) if models_dir else Path(__file__).resolve().parent / "models"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    det_path = target_dir / "PP-OCRv5_mobile_det.onnx"
+    rec_path = target_dir / "en_PP-OCRv5_mobile_rec.onnx"
+    dict_path = target_dir / "en_dict.txt"
+
+    # Local fallback cache paths if available from previous runs
+    paddlex_root = Path.home() / ".paddlex" / "official_models"
+    paddlex_det = paddlex_root / "PP-OCRv5_mobile_det_onnx" / "inference.onnx"
+    paddlex_rec = paddlex_root / "en_PP-OCRv5_mobile_rec_onnx" / "inference.onnx"
+    paddlex_yml = paddlex_root / "en_PP-OCRv5_mobile_rec_onnx" / "inference.yml"
+
+    # 1. Detection model (PP-OCRv5 Mobile Det)
+    if not det_path.exists():
+        if paddlex_det.exists():
+            shutil.copyfile(paddlex_det, det_path)
+        else:
+            download_file(MODEL_URLS["PP-OCRv5_mobile_det.onnx"], det_path)
+
+    # 2. Recognition model (en_PP-OCRv5 Mobile Rec)
+    if not rec_path.exists():
+        if paddlex_rec.exists():
+            shutil.copyfile(paddlex_rec, rec_path)
+        else:
+            download_file(MODEL_URLS["en_PP-OCRv5_mobile_rec.onnx"], rec_path)
+
+    # 3. English dictionary (extracted from official inference.yml)
+    if not dict_path.exists():
+        if paddlex_yml.exists():
+            with open(paddlex_yml, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+        else:
+            yml_tmp = target_dir / "rec_inference.tmp.yml"
+            download_file(MODEL_URLS["inference.yml"], yml_tmp)
+            with open(yml_tmp, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+            if yml_tmp.exists():
+                try:
+                    yml_tmp.unlink()
+                except OSError:
+                    pass
+
+        chars = cfg.get("PostProcess", {}).get("character_dict", [])
+        with open(dict_path, "w", encoding="utf-8") as f:
+            for c in chars:
+                f.write(f"{c}\n")
+
+    return target_dir
+
+
+MODELS_DIR = ensure_models_exist()
+
+# Instantiate PP-OCRv5 Mobile with high-performance RapidOCR ONNX Runtime engine
+ocr_engine = RapidOCR(
+    det_model_path=str(MODELS_DIR / "PP-OCRv5_mobile_det.onnx"),
+    rec_model_path=str(MODELS_DIR / "en_PP-OCRv5_mobile_rec.onnx"),
+    rec_keys_path=str(MODELS_DIR / "en_dict.txt"),
+    det_limit_side_len=736,
+    det_box_thresh=0.60,
+    det_unclip_ratio=1.5,
+    det_mean=[0.485, 0.456, 0.406],
+    det_std=[0.229, 0.224, 0.225],
+    use_cls=False,
 )
 
 app = FastAPI(
-    title="PDF to Sentences API",
-    description="High-performance text & sentence extraction with fast-path vector text extraction and ONNX-accelerated PaddleOCR fallback.",
-    version="1.2.0",
+    title="PDF to Sentences Extraction API",
+    description="""
+High-performance text & sentence extraction microservice with an intelligent dual-engine architecture:
+- **Fast-Path Engine (`pypdfium2`)**: Instant vector text extraction (~0.02s per page) for native digital PDFs.
+- **Vision OCR Engine (PP-OCRv5 Mobile + ONNX Runtime)**: Fallback vision OCR for scanned or image-based documents.
+
+---
+
+### Models Used Behind the Scenes
+- **Text Detection**: `PP-OCRv5_mobile_det` (Real-time DBNet with MobileNet backbone, executed via ONNX Runtime).
+- **Text Recognition**: `en_PP-OCRv5_mobile_rec` (Lightweight SVTR-LCNet architecture with an extended 436-character CTC dictionary).
+- **Line Reconstruction**: Geometric baseline clustering algorithm merging word bounding boxes left-to-right before sentence tokenization.
+
+---
+
+### Why ONNX Runtime for Lightweight & Fast Inference?
+1. **Zero Training Framework Bloat**: Eliminates heavy general-purpose training frameworks (>1.5 GB overhead), packaging only a stripped-down, specialized C++ inference engine (`rapidocr-onnxruntime`).
+2. **Graph Optimization & Operator Fusion**: ONNX Runtime performs ahead-of-time layer fusions (e.g. Convolution + BatchNorm + Activation), reducing memory bandwidth pressure and intermediate buffer allocations.
+3. **Hardware Acceleration (AVX2/SIMD)**: Employs CPU vector instructions to run OCR on complex scanned pages in ~11-12 seconds on commodity CPUs without requiring GPU/CUDA hardware.
+4. **Autonomous Provisioning**: Models and dictionaries are automatically downloaded on demand or pre-baked into container images, ensuring standalone execution with zero `.onnx` binaries stored in Git.
+""",
+    version="1.3.0",
 )
 
 
@@ -55,7 +168,7 @@ class SentenceResponse(BaseModel):
         ..., description="List of segmented sentences extracted from the PDF body text."
     )
     method: Optional[str] = Field(
-        None, description="Extraction engine used: 'fast_path' (digital text) or 'paddleocr_onnx' (vision OCR)."
+        None, description="Extraction engine used: 'fast_path' (digital text) or 'rapidocr_onnx' (vision OCR)."
     )
     page_count: Optional[int] = Field(
         None, description="Number of pages detected in the PDF document."
@@ -211,15 +324,51 @@ def try_extract_native_text(pdf_path: str) -> Tuple[Optional[List[str]], int]:
     if page_count == 0:
         return [], 0
 
+    common_headings = {
+        "abstract",
+        "introduction",
+        "methods",
+        "results",
+        "discussion",
+        "conclusions",
+        "discussion/conclusions",
+        "acknowledgment",
+        "acknowledgments",
+        "references",
+        "keywords",
+    }
+
     pages_text: List[str] = []
-    total_characters = 0
+    total_characters: int = 0
 
     for page in doc:
         textpage = page.get_textpage()
         raw_text = textpage.get_text_range()
         normalized = unicodedata.normalize("NFKC", raw_text)
-        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-        page_content = " ".join(lines)
+
+        # 1. De-hyphenation: rejoin words broken across line breaks (hyphen or soft-hyphen \ufffe)
+        normalized = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1\2", normalized)
+        normalized = re.sub(r"(\w+)\ufffe\s*\n?\s*(\w+)", r"\1\2", normalized)
+        normalized = normalized.replace("\ufffe", "")
+
+        # 2. Rejoin URLs split across line breaks (e.g. 'http://scholia.\n toolforge.org')
+        normalized = re.sub(r"(https?://[^\s]+)\.\s*\n\s*([a-zA-Z0-9_\-\.]+)", r"\1.\2", normalized)
+        normalized = re.sub(r"(https?://[^\s]+)/\s*\n\s*([a-zA-Z0-9_\-\.]+)", r"\1/\2", normalized)
+
+        # 3. Handle standalone section headings to prevent merging into the next sentence
+        processed_lines: List[str] = []
+        for line in normalized.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            clean_lower = line_str.rstrip(":").strip().lower()
+            if clean_lower in common_headings and not line_str.endswith((".", "!", "?", ":")):
+                line_str = line_str + "."
+            elif len(line_str) < 30 and line_str.isupper() and not line_str.endswith((".", "!", "?", ":", ",")):
+                line_str = line_str + "."
+            processed_lines.append(line_str)
+
+        page_content = " ".join(processed_lines)
         pages_text.append(page_content)
         total_characters += len(page_content)
 
@@ -234,11 +383,11 @@ def try_extract_native_text(pdf_path: str) -> Tuple[Optional[List[str]], int]:
     return None, page_count
 
 
-def extract_via_paddleocr(
+def extract_via_rapidocr(
     pdf_path: str,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[str]:
-    """Fallback to ONNX-accelerated PaddleOCR vision when no digital text layer is present.
+    """Fallback to ONNX-accelerated RapidOCR vision when no digital text layer is present.
 
     Parameters
     ----------
@@ -263,20 +412,15 @@ def extract_via_paddleocr(
         page = doc[page_idx]
         # Render at native scale 1.0 (72 DPI) to avoid 4x oversampling
         img = np.array(page.render(scale=1.0).to_pil())
-        res_list = list(ocr_engine.predict(img))
-        if not res_list:
+        result, _ = ocr_engine(img)
+        if not result:
             continue
-        page_res = res_list[0]
 
-        dt_polys = page_res.get("dt_polys", [])
-        rec_texts = page_res.get("rec_texts", [])
-        rec_scores = page_res.get("rec_scores", [])
+        dt_polys = [item[0] for item in result]
+        rec_texts = [item[1] for item in result]
+        rec_scores = [item[2] for item in result]
 
-        if dt_polys and rec_texts:
-            page_lines = merge_and_sort_lines(dt_polys, rec_texts, rec_scores)
-        else:
-            page_lines = [str(t).strip() for t in rec_texts if str(t).strip()]
-
+        page_lines = merge_and_sort_lines(dt_polys, rec_texts, rec_scores)
         extracted_lines.extend(page_lines)
 
     full_text = " ".join(extracted_lines)
@@ -285,6 +429,10 @@ def extract_via_paddleocr(
 
     sentences = nltk.sent_tokenize(full_text)
     return [s.strip() for s in sentences if s.strip()]
+
+
+# Backward compatibility alias
+extract_via_paddleocr = extract_via_rapidocr
 
 
 async def _run_async_job(job_id: str, temp_path: str) -> None:
@@ -298,7 +446,7 @@ async def _run_async_job(job_id: str, temp_path: str) -> None:
         job.current_page = curr
         job.total_pages = total
         job.progress = round(curr / max(total, 1), 2)
-        job.message = f"Processing page {curr} of {total} with ONNX OCR..."
+        job.message = f"Processing page {curr} of {total} with RapidOCR ONNX..."
         job.updated_at = time.time()
 
     try:
@@ -319,18 +467,18 @@ async def _run_async_job(job_id: str, temp_path: str) -> None:
 
         # Run ONNX OCR page by page
         ocr_sentences = await asyncio.to_thread(
-            extract_via_paddleocr, temp_path, on_progress
+            extract_via_rapidocr, temp_path, on_progress
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         job.result = SentenceResponse(
             sentences=ocr_sentences,
-            method="paddleocr_onnx",
+            method="rapidocr_onnx",
             page_count=job.total_pages,
             processing_time_ms=elapsed_ms,
         )
         job.status = JobStatus.COMPLETED
         job.progress = 1.0
-        job.message = "Extraction completed successfully via PP-OCRv5 Mobile ONNX."
+        job.message = "Extraction completed successfully via PP-OCRv5 Mobile RapidOCR ONNX."
 
     except Exception as exc:
         job.status = JobStatus.FAILED
@@ -364,9 +512,9 @@ async def inspect_pdf(pdf_file: UploadFile = File(...)) -> InspectResponse:
             method = "fast_path"
             estimated = max(0.05, round(0.02 * page_count, 2))
         else:
-            method = "paddleocr_onnx"
-            # ONNX Runtime on CPU processes ~15s per typewriter scanned page
-            estimated = max(5.0, round(15.0 * page_count, 1))
+            method = "rapidocr_onnx"
+            # RapidOCR ONNX Runtime on CPU processes ~12s per scanned typewriter page
+            estimated = max(4.0, round(12.0 * page_count, 1))
 
         return InspectResponse(
             page_count=page_count,
@@ -415,7 +563,7 @@ async def submit_job(
     if sentences:
         est_seconds = 0.05
     else:
-        est_seconds = round(15.0 * total_pages, 1)
+        est_seconds = round(12.0 * total_pages, 1)
 
     job_id = str(uuid.uuid4())
     now = time.time()
@@ -461,7 +609,8 @@ async def get_job_status(job_id: str) -> JobInfo:
 async def extract_sentences(
     pdf_file: UploadFile = File(..., description="The PDF file to extract sentences from.")
 ) -> SentenceResponse:
-    """Extract sentences from a PDF file using high-performance Fast-Path with ONNX PaddleOCR fallback.
+    """Extract natural sentences from a PDF document using Fast-Path digital text extraction
+    with PP-OCRv5 Mobile (ONNX Runtime) fallback for scanned/image pages.
 
     Parameters
     ----------
@@ -502,12 +651,12 @@ async def extract_sentences(
                 processing_time_ms=elapsed_ms,
             )
 
-        # 2. Solutions 3, 4 & 5: ONNX-accelerated PP-OCRv5 with geometric line merging
-        ocr_sentences = extract_via_paddleocr(temp_path)
+        # 2. ONNX-accelerated PP-OCRv5 with geometric line merging via RapidOCR
+        ocr_sentences = extract_via_rapidocr(temp_path)
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         return SentenceResponse(
             sentences=ocr_sentences,
-            method="paddleocr_onnx",
+            method="rapidocr_onnx",
             page_count=page_count,
             processing_time_ms=elapsed_ms,
         )

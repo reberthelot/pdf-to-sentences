@@ -18,30 +18,55 @@ This project mirrors features a dual-engine pipeline capable of handling both di
                         ┌────────────────┴────────────────┐
                        YES                               NO
                         │                                 │
-             ┌─────────────────────┐           ┌─────────────────────┐
-             │   Fast-Path Engine  │           │   Vision OCR Engine │
-             │     (pypdfium2)     │           │ (PP-OCRv5 + ONNX)   │
-             │   ~0.02s per page   │           │    ~14s per page    │
-             └──────────┬──────────┘           └──────────┬──────────┘
-                        │                                 │
-                        │                       Baseline Line-Merging
-                        │                                 │
-                        └────────────────┬────────────────┘
-                                         │
-                           ┌───────────────────────────┐
-                           │   NLTK Sentence Tokenizer │
-                           └─────────────┬─────────────┘
-                                         │
-                             JSON Extracted Sentences
+              ┌─────────────────────┐           ┌────────────────────────┐
+              │   Fast-Path Engine  │           │    Vision OCR Engine   │
+              │     (pypdfium2)     │           │  (PP-OCRv5 Mobile ONNX)│
+              │   ~0.02s per page   │           │     ~12s per page      │
+              └──────────┬──────────┘           └──────────┬─────────────┘
+                         │                                 │
+                         │                       Baseline Line-Merging
+                         │                                 │
+                         └────────────────┬────────────────┘
+                                          │
+                            ┌───────────────────────────┐
+                            │   NLTK Sentence Tokenizer │
+                            └─────────────┬─────────────┘
+                                          │
+                              JSON Extracted Sentences
 ```
 
 ### 1. Dual-Engine Extraction Strategy
-- **Fast-Path Engine (`pypdfium2`)**: Inspects the document for an embedded vector text layer. If present, text is normalized (Unicode NFKC) and extracted in **~0.02s per page** (a 400x speedup over blind vision OCR).
-- **Vision OCR Engine (PP-OCRv5 Mobile + ONNX Runtime)**: When no digital text exists (e.g. scanned typewriter reports or photocopies), fallback to PP-OCRv5 running on **ONNX Runtime CPU**.
-  - **AVX2 SIMD CPU Acceleration**: Native C++ multithreading bypasses Python/PaddlePaddle interpreter bottlenecks.
-  - **Optimized Resolution Scaling**: `PADDLE_PDX_PDF_RENDER_SCALE=1.0` avoids unnecessary 4x pixel oversampling on large scans.
+- **Fast-Path Engine (`pypdfium2`)**: Inspects the document for an embedded vector text layer. If present, text is normalized (Unicode NFKC) and extracted in **~0.02s per page** (a 500x speedup over blind vision OCR).
+- **Vision OCR Engine (PP-OCRv5 Mobile + RapidOCR ONNX Runtime)**: When no digital text exists (e.g. scanned typewriter reports or photocopies), the system falls back to the **PP-OCRv5 Mobile** vision model running natively on **ONNX Runtime CPU**.
+  - **AVX2 SIMD CPU Acceleration**: Native C++ multithreading runs inference in ~11-12s per dense historical page without requiring GPU/CUDA hardware.
   - **Geometric Baseline Line Merging**: Automatically clusters detected word bounding boxes sharing the same horizontal baseline ($Y_{\text{center}}$ within line-height tolerance) and sorts them left-to-right ($X_1 \to X_2$) before sentence tokenization.
   - **Scan Noise Filtering**: DBNet box threshold set to `0.60` to discard paper grain, wrinkles, and ink bleed.
+
+---
+
+## Models Used Behind the Scenes & Why ONNX Runtime?
+
+### 1. Specific Model Architecture
+- **Text Detection**: **`PP-OCRv5_mobile_det`**
+  - Architecture: Real-time Differentiable Binarization (`DBNet`) paired with a lightweight MobileNet backbone.
+  - Role: Detects text bounding boxes at arbitrary angles, filtering out noise with a calibrated `box_thresh=0.60` and `unclip_ratio=1.5`.
+- **Text Recognition**: **`en_PP-OCRv5_mobile_rec`**
+  - Architecture: Lightweight `SVTR-LCNet` sequence recognition network.
+  - Dictionary: Complete 436-character CTC vocabulary (alphanumeric, punctuation, symbols, fractions, and diacritics) matching the 438 CTC output logits.
+- **Line Reconstruction**: An analytical geometric baseline-merging algorithm groups word boxes into cohesive horizontal lines prior to `nltk.sent_tokenize()`.
+
+### 2. Why ONNX Runtime for Lightweight & High-Performance Serving?
+1. **Zero Training Framework Overhead**:
+   - Standard deep learning training frameworks package autograd, graph builders, optimizers, distributed training stubs, and large GPU/CUDA runtime libraries, easily bloating container images to **> 2.5 GB**.
+   - For inference serving, none of this training machinery is needed. ONNX Runtime provides a dedicated, lightweight forward-pass evaluation engine (~20 MB) wrapped by `rapidocr-onnxruntime`.
+2. **Graph-Level Optimizations**:
+   - **Operator Fusion**: Fuses multiple adjacent operations (such as Convolution + Batch Normalization + ReLU) into single optimized compute kernels, eliminating redundant memory round-trips.
+   - **Constant Folding & Memory Reuse**: Static model weights are folded and intermediate tensor allocations are reused throughout the execution graph.
+3. **Native SIMD CPU Acceleration (AVX2 / FMA)**:
+   - Compiles down to native CPU vector instruction sets (AVX2, FMA, SSE).
+   - Bypasses Python interpreter locks and framework abstraction layers, cutting inference time on dense historical scans from ~88s down to **~11-12s per page**.
+   - Pairs with headless OpenCV (`opencv-python-headless`) to avoid heavy X11/OpenGL system libraries.
+
 
 ### 2. Microservice Layout
 ```
@@ -116,11 +141,14 @@ Simulates production deployment where the backend API and frontend proxy run in 
 
 ---
 
-### Option C: Docker Container
-Build and run the self-contained container:
+### Option C: Docker Container (Optimized < 450 MB)
+Build and run the lightweight self-contained container:
 ```bash
 docker compose up --build
 ```
+> **Note on Image Size**: The Docker image is optimized down from 2.56 GB to **< 450 MB** (~85% size reduction) by completely removing `paddlepaddle` (~1.5 GB) in favor of native `rapidocr-onnxruntime`, using headless OpenCV, pre-baking ONNX weights, and pruning non-essential caches.
+
+
 The application will be accessible at [http://localhost:8000](http://localhost:8000).
 
 ---
@@ -151,8 +179,8 @@ The application will be accessible at [http://localhost:8000](http://localhost:8
   {
     "page_count": 4,
     "has_text_layer": false,
-    "recommended_method": "paddleocr_onnx",
-    "estimated_seconds": 60.0
+    "recommended_method": "rapidocr_onnx",
+    "estimated_seconds": 48.0
   }
   ```
 

@@ -244,8 +244,8 @@
         if (engineUsedEl) {
           if (data.method === "fast_path") {
             engineUsedEl.innerHTML = '<span class="ok">⚡ Fast-Path</span>';
-          } else if (data.method === "paddleocr") {
-            engineUsedEl.innerHTML = '<span class="bad">👁️ PaddleOCR</span>';
+          } else if (data.method === "rapidocr_onnx" || data.method === "paddleocr_onnx" || data.method === "paddleocr") {
+            engineUsedEl.innerHTML = '<span class="bad">👁️ RapidOCR ONNX</span>';
           } else {
             engineUsedEl.textContent = data.method || "default";
           }

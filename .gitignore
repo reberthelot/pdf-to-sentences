@@ -222,3 +222,8 @@ __marimo__/
 # Course content
 pdf-to-sentences.md
 pdf-to-sentences.pdf
+
+# Downloaded ONNX OCR models & dictionaries
+models/*.onnx
+models/*.yml
+models/*.txt

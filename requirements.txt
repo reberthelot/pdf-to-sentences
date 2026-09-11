@@ -3,10 +3,10 @@ uvicorn
 python-multipart
 httpx
 pydantic
-paddlepaddle
-paddleocr
-onnxruntime
+rapidocr-onnxruntime
+pyyaml
 pypdfium2
 nltk
 pytest
+
 
