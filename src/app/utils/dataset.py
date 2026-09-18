@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from typing import Any, Dict, List
 
-# Evaluation and self-test dataset with sample PDFs and expected sentences
+# Evaluation and self-test benchmark dataset with sample PDFs and expected sentences
 SELFTEST_DATASET: List[Dict[str, Any]] = [
     {
         "filename": "studyboard.pdf",

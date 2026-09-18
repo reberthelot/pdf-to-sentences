@@ -68,27 +68,48 @@ This project mirrors features a dual-engine pipeline capable of handling both di
    - Pairs with headless OpenCV (`opencv-python-headless`) to avoid heavy X11/OpenGL system libraries.
 
 
-### 2. Microservice Layout
+### 2. Professional Project Structure
 ```
 pdf-to-sentences/
-├── backend.py            # Core extraction API, inspect endpoint, async job worker
-├── frontend.py           # Single-page web dashboard & API proxy
-├── frontend_service.py   # Client communication layer, latency tracking, self-test logic
-├── main.py               # Unified application entry point (mounts backend + frontend)
-├── dataset.py            # Built-in regression test datasets & expected sentences
-├── test_main.py          # Pytest automated test harness
-├── requirements.txt      # Python dependencies
-├── Dockerfile            # Container image definition with pre-cached ONNX models
-├── compose.yaml          # Multi-container orchestration specification
-├── template/
-│   └── index.html        # Responsive frontend template
-├── static/
-│   ├── app.js            # Frontend JavaScript (inspection, extraction, live timer)
-│   └── styles.css        # Modern typography and styling
-└── examples/
-    ├── studyboard.pdf    # Vector text sample (Fast-Path test)
-    ├── 2303.15133.pdf    # Academic paper sample (Course spec test)
-    └── CAB_Accident_Report,_United_Air_Lines_Flight_2.pdf  # 1941 scan sample (OCR test)
+├── frontend/
+│   ├── static/
+│   │   ├── css/
+│   │   │   └── style.css          # DTU-themed CSS (variables, responsive layout, cards)
+│   │   └── js/
+│   │       └── app.js             # Asynchronous API requests, test runner & UI updates
+│   └── templates/
+│       └── index.html             # Semantic HTML5 template rendered for the browser
+├── src/
+│   └── app/
+│       ├── __init__.py            # Package init containing teacher assignment specifications
+│       ├── config.py              # Environment-driven configuration dataclass (Settings)
+│       ├── models.py              # Strict Pydantic v2 schemas for requests & responses
+│       ├── utils/
+│       │   ├── __init__.py
+│       │   ├── dataset.py         # Benchmark dataset (English sample PDFs & expected sentences)
+│       │   ├── metrics.py         # In-memory operational metrics collector
+│       │   └── normalization.py   # Text normalization and line clustering with doctests
+│       ├── services/
+│       │   ├── __init__.py
+│       │   ├── extraction_service.py # Fast-Path & PP-OCRv5 Mobile ONNX extraction engine
+│       │   └── sentence_client.py # Async HTTP client with pedagogic error diagnostics
+│       ├── routes/
+│       │   ├── __init__.py
+│       │   ├── frontend.py        # Frontend HTML view route ('/') and UI proxy endpoints
+│       │   └── api.py             # REST API routes (/v1/extract-sentences, /v1/jobs/...)
+│       └── main.py                # FastAPI application factory and entry point
+├── tests/
+│   ├── __init__.py
+│   ├── test_normalization.py     # Unit tests for text normalization and line clustering
+│   ├── test_metrics.py           # Unit tests for operational metrics tracker
+│   └── test_api.py               # Integration tests for FastAPI endpoints
+├── examples/                      # Reference PDF documents for testing & verification
+├── models/                        # Pre-cached PP-OCRv5 ONNX models & dictionary
+├── main.py                        # Root entry point wrapper
+├── requirements.txt              # Pinned runtime and development dependencies
+├── Dockerfile                    # Container image definition with pre-cached ONNX models
+├── compose.yaml                  # Multi-container orchestration specification
+└── README.md                     # Documentation and usage guide
 ```
 
 ---
@@ -115,6 +136,10 @@ pip install -r requirements.txt
 
 ### Option A: Unified Web Application (Recommended)
 Launches both the extraction backend and the frontend user interface on port 8000:
+```powershell
+python main.py
+```
+Or with Uvicorn CLI:
 ```powershell
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```

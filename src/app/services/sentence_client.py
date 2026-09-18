@@ -1,82 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-import os
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from dataset import SELFTEST_DATASET
-
-DEFAULT_SERVICE_URL = os.environ.get(
-    "SENTENCE_SERVICE_URL", "http://localhost:8000/v1/extract-sentences"
-)
-TIMEOUT_SECONDS = float(os.environ.get("SERVICE_TIMEOUT_SECONDS", "90"))
-TIMEOUT_SECONDS = float(os.environ.get("SERVICE_TIMEOUT_SECONDS", "180"))
-CONNECT_TIMEOUT_SECONDS = float(os.environ.get("SERVICE_CONNECT_TIMEOUT_SECONDS", "10"))
-APP_DIR = Path(__file__).resolve().parent
-
-
-@dataclass
-class Metrics:
-    """In-memory operational metrics for request tracking and latency measurement."""
-
-    total_requests: int = 0
-    success_requests: int = 0
-    failed_requests: int = 0
-    last_latency_ms: Optional[float] = None
-    latency_ms_sum: float = 0.0
-    latency_ms_count: int = 0
-    last_error: Optional[str] = None
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    async def record_success(self, latency_ms: float) -> None:
-        async with self.lock:
-            self.total_requests += 1
-            self.success_requests += 1
-            self.last_latency_ms = latency_ms
-            self.latency_ms_sum += latency_ms
-            self.latency_ms_count += 1
-            self.last_error = None
-
-    async def record_failure(self, latency_ms: Optional[float], error: str) -> None:
-        async with self.lock:
-            self.total_requests += 1
-            self.failed_requests += 1
-            self.last_latency_ms = latency_ms
-            self.last_error = error
-
-    async def reset(self) -> None:
-        async with self.lock:
-            self.total_requests = 0
-            self.success_requests = 0
-            self.failed_requests = 0
-            self.last_latency_ms = None
-            self.latency_ms_sum = 0.0
-            self.latency_ms_count = 0
-            self.last_error = None
-
-    async def snapshot(self, service_url: str = DEFAULT_SERVICE_URL) -> Dict[str, Any]:
-        async with self.lock:
-            avg = (
-                self.latency_ms_sum / self.latency_ms_count
-                if self.latency_ms_count > 0
-                else None
-            )
-            return {
-                "service_url": service_url,
-                "timeout_seconds": TIMEOUT_SECONDS,
-                "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
-                "total_requests": self.total_requests,
-                "success_requests": self.success_requests,
-                "failed_requests": self.failed_requests,
-                "last_latency_ms": self.last_latency_ms,
-                "avg_latency_ms": avg,
-                "last_error": self.last_error,
-            }
+from src.app.config import settings
+from src.app.utils.dataset import SELFTEST_DATASET
+from src.app.utils.metrics import Metrics
 
 
 def pedagogic_http_error(ex: Exception, service_url: str) -> str:
@@ -91,7 +23,7 @@ def pedagogic_http_error(ex: Exception, service_url: str) -> str:
     if isinstance(ex, httpx.ReadTimeout):
         return (
             "The service did not respond before the timeout.\n"
-            f"- Current timeout: {TIMEOUT_SECONDS} seconds\n"
+            f"- Current timeout: {settings.TIMEOUT_SECONDS} seconds\n"
             "- Large PDFs can take time on CPU.\n"
             "- Consider optimizing the service or increasing SERVICE_TIMEOUT_SECONDS.\n"
         )
@@ -108,30 +40,17 @@ def pedagogic_http_error(ex: Exception, service_url: str) -> str:
 
 
 async def call_sentence_service(
-    pdf_bytes: bytes, filename: str, service_url: str = DEFAULT_SERVICE_URL
+    pdf_bytes: bytes,
+    filename: str,
+    service_url: str = settings.SERVICE_URL,
 ) -> Tuple[List[str], float, Dict[str, Any]]:
-    """Call the sentence extraction backend service and return sentences, latency, and metadata.
-
-    Parameters
-    ----------
-    pdf_bytes : bytes
-        Binary content of the PDF.
-    filename : str
-        Original filename for multipart headers.
-    service_url : str
-        Target backend service endpoint.
-
-    Returns
-    -------
-    Tuple[List[str], float, Dict[str, Any]]
-        Extracted sentences, latency in ms, and metadata dict (method, page_count).
-    """
+    """Call the sentence extraction backend service and return sentences, latency, and metadata."""
     timeout = httpx.Timeout(
-        TIMEOUT_SECONDS,
-        connect=CONNECT_TIMEOUT_SECONDS,
-        read=TIMEOUT_SECONDS,
-        write=TIMEOUT_SECONDS,
-        pool=TIMEOUT_SECONDS,
+        settings.TIMEOUT_SECONDS,
+        connect=settings.CONNECT_TIMEOUT_SECONDS,
+        read=settings.TIMEOUT_SECONDS,
+        write=settings.TIMEOUT_SECONDS,
+        pool=settings.TIMEOUT_SECONDS,
     )
 
     t0 = time.perf_counter()
@@ -167,7 +86,9 @@ async def call_sentence_service(
 
 
 async def inspect_pdf_service(
-    pdf_bytes: bytes, filename: str, service_url: str = DEFAULT_SERVICE_URL
+    pdf_bytes: bytes,
+    filename: str,
+    service_url: str = settings.SERVICE_URL,
 ) -> Dict[str, Any]:
     """Inspect PDF to estimate page count and duration."""
     inspect_url = service_url.replace("/v1/extract-sentences", "/v1/inspect-pdf")
@@ -182,8 +103,46 @@ async def inspect_pdf_service(
     raise ValueError(f"Inspect failed with status {resp.status_code}: {resp.text[:200]}")
 
 
+async def submit_job_service(
+    pdf_bytes: bytes,
+    filename: str,
+    service_url: str = settings.SERVICE_URL,
+) -> Dict[str, Any]:
+    """Submit a PDF file to the backend asynchronous job queue."""
+    submit_url = service_url.replace("/v1/extract-sentences", "/v1/jobs/submit")
+    timeout = httpx.Timeout(30.0, connect=settings.CONNECT_TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        files = {"pdf_file": (filename, pdf_bytes, "application/pdf")}
+        resp = await client.post(submit_url, files=files)
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Job submission failed with status {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+
+
+async def get_job_status_service(
+    job_id: str,
+    service_url: str = settings.SERVICE_URL,
+) -> Dict[str, Any]:
+    """Query progress status and result of a background job."""
+    status_url = service_url.replace("/v1/extract-sentences", f"/v1/jobs/{job_id}")
+    timeout = httpx.Timeout(10.0, connect=settings.CONNECT_TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(status_url)
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Job status query failed with status {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+
+
 async def run_selftest(
-    service_url: str = DEFAULT_SERVICE_URL,
+    service_url: str = settings.SERVICE_URL,
     metrics_tracker: Optional[Metrics] = None,
 ) -> Dict[str, Any]:
     """Execute validation tests using reference sample PDFs and update operational metrics."""
@@ -194,9 +153,9 @@ async def run_selftest(
         fname = item["filename"]
         expected = item["sentences"]
 
-        path = APP_DIR / fname
+        path = settings.BASE_DIR / fname
         if not path.exists():
-            path = APP_DIR / "examples" / fname
+            path = settings.EXAMPLES_DIR / fname
 
         if not path.exists():
             if metrics_tracker:
@@ -222,7 +181,6 @@ async def run_selftest(
                 pdf_bytes, fname, service_url=service_url
             )
 
-            # OCR / service extraction succeeded (valid HTTP 200 with extracted sentences)
             if metrics_tracker:
                 await metrics_tracker.record_success(latency_ms=latency_ms)
 
@@ -277,39 +235,4 @@ async def run_selftest(
         "total": len(SELFTEST_DATASET),
         "results": results,
     }
-
-
-async def submit_job_service(
-    pdf_bytes: bytes, filename: str, service_url: str = DEFAULT_SERVICE_URL
-) -> Dict[str, Any]:
-    """Submit a PDF file to the backend asynchronous job queue."""
-    submit_url = service_url.replace("/v1/extract-sentences", "/v1/jobs/submit")
-    timeout = httpx.Timeout(30.0, connect=CONNECT_TIMEOUT_SECONDS)
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        files = {"pdf_file": (filename, pdf_bytes, "application/pdf")}
-        resp = await client.post(submit_url, files=files)
-
-    if resp.status_code != 200:
-        raise ValueError(
-            f"Job submission failed with status {resp.status_code}: {resp.text[:500]}"
-        )
-    return resp.json()
-
-
-async def get_job_status_service(
-    job_id: str, service_url: str = DEFAULT_SERVICE_URL
-) -> Dict[str, Any]:
-    """Query progress status and result of a background job."""
-    status_url = service_url.replace("/v1/extract-sentences", f"/v1/jobs/{job_id}")
-    timeout = httpx.Timeout(10.0, connect=CONNECT_TIMEOUT_SECONDS)
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(status_url)
-
-    if resp.status_code != 200:
-        raise ValueError(
-            f"Job status query failed with status {resp.status_code}: {resp.text[:500]}"
-        )
-    return resp.json()
 

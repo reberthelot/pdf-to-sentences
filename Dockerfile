@@ -32,7 +32,7 @@ RUN python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('p
 COPY . /app
 
 # Pre-download PP-OCRv5 Mobile ONNX models and dictionary into /app/models for standalone execution
-RUN python -c "from backend import ensure_models_exist; ensure_models_exist('/app/models')" \
+RUN python -c "from src.app.services.extraction_service import ensure_models_exist; ensure_models_exist('/app/models')" \
     && rm -rf /root/.cache /tmp/*
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

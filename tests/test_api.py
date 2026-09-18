@@ -1,20 +1,46 @@
+from __future__ import annotations
+
+import time
 from pathlib import Path
+
 from fastapi.testclient import TestClient
-from main import app
+
+from src.app.config import settings
+from src.app.main import app
 
 client = TestClient(app)
-APP_DIR = Path(__file__).resolve().parent
 
 
 def _get_pdf_path(filename: str) -> Path:
     """Resolve sample PDF path from root or examples folder."""
-    root_path = APP_DIR / filename
+    root_path = settings.BASE_DIR / filename
     if root_path.exists():
         return root_path
-    examples_path = APP_DIR / "examples" / filename
+    examples_path = settings.EXAMPLES_DIR / filename
     if examples_path.exists():
         return examples_path
-    raise FileNotFoundError(f"Could not find {filename} in {APP_DIR} or {APP_DIR / 'examples'}")
+    raise FileNotFoundError(f"Could not find {filename} in {settings.BASE_DIR} or {settings.EXAMPLES_DIR}")
+
+
+def test_ui_index_redirect():
+    """Verify root / redirects to /ui and renders index HTML."""
+    response = client.get("/", follow_redirects=True)
+    assert response.status_code == 200
+    assert "PDF → Sentences" in response.text
+
+
+def test_inspect_pdf():
+    """Verify inspection endpoint estimating duration and detecting layer."""
+    pdf_path = _get_pdf_path("studyboard.pdf")
+    with open(pdf_path, "rb") as f:
+        files = {"pdf_file": ("studyboard.pdf", f, "application/pdf")}
+        response = client.post("/v1/inspect-pdf", files=files)
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert "page_count" in data
+    assert "has_text_layer" in data
+    assert "recommended_method" in data
 
 
 def test_extract_sentences_studyboard():
@@ -36,7 +62,7 @@ def test_extract_sentences_studyboard():
 
 
 def test_extract_sentences_assignment_spec():
-    """Verify sentence extraction on 2303.15133.pdf according to temp.md specifications."""
+    """Verify sentence extraction on 2303.15133.pdf according to assignment specifications."""
     pdf_path = _get_pdf_path("2303.15133.pdf")
 
     with open(pdf_path, "rb") as f:
@@ -87,8 +113,6 @@ def test_metrics_updated_on_async_job():
     assert submit_resp.status_code == 200, submit_resp.text
     job_id = submit_resp.json()["job_id"]
 
-    # Poll via /ui/api/jobs/{job_id} until completed (fast-path completes in ms)
-    import time
     for _ in range(20):
         status_resp = client.get(f"/ui/api/jobs/{job_id}")
         assert status_resp.status_code == 200
@@ -100,6 +124,4 @@ def test_metrics_updated_on_async_job():
     total_after = metrics_after.get("total_requests", 0)
     assert total_after >= total_before + 1
     assert metrics_after.get("success_requests", 0) >= 1
-
-
 

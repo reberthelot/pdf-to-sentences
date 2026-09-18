@@ -109,7 +109,6 @@
       if (mLast) mLast.textContent = fmtMs(m.last_latency_ms);
       if (mErr) mErr.textContent = m.last_error ? m.last_error.replace(/\s+/g, " ").slice(0, 140) : "—";
     } catch (e) {
-      // If metrics fail, fail silently
       // Ignore network errors on metrics poll
     }
   }
@@ -121,7 +120,6 @@
 
     if (btn) btn.disabled = true;
     if (status) status.textContent = "running...";
-    if (out) out.textContent = "Running self-test...";
     if (out) out.textContent = "Running self-test on reference datasets...";
 
     try {
@@ -135,10 +133,8 @@
 
       for (const it of (data.results || [])) {
         const badge = it.ok ? "OK" : "FAIL";
-        lines.push(`[${badge}] ${it.filename}`);
         lines.push(`[${badge}] ${it.filename} (${it.method || 'default'})`);
         if (it.latency_ms !== null && it.latency_ms !== undefined) {
-          lines.push(`  latency_ms: ${fmtMs(it.latency_ms)}`);
           lines.push(`  latency: ${fmtMs(it.latency_ms)}`);
         }
         if (it.num_returned_sentences !== null && it.num_returned_sentences !== undefined) {
@@ -268,7 +264,7 @@
   const extractAsyncBtn = document.getElementById("extractAsyncBtn");
   const jobsContainer = document.getElementById("jobsContainer");
   const jobsCountBadge = document.getElementById("jobsCountBadge");
-  const trackedJobs = new Map(); // job_id -> { id, filename, postTime, endTime, status, progress, currentPage, totalPages, message, result, error, expanded }
+  const trackedJobs = new Map();
   let jobsPollInterval = null;
 
   function updateJobsListUI() {
@@ -313,7 +309,6 @@
     `;
 
     for (const job of sortedJobs) {
-      // Freezes timer when job reaches completed or failed
       const endTimestamp = job.endTime || (job.status === "completed" || job.status === "failed" ? (job.updatedAt ? job.updatedAt * 1000 : now) : now);
       const elapsedSec = Math.max(0, Math.floor((endTimestamp - job.postTime) / 1000));
       const elapsedStr = elapsedSec < 60 ? `${elapsedSec}s` : `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s`;
@@ -384,14 +379,12 @@
 
     jobsContainer.innerHTML = html;
 
-    // Restore scroll positions of open pre blocks
     scrollMap.forEach((top, jobId) => {
       const el = jobsContainer.querySelector(`pre[data-job-pre="${jobId}"]`);
       if (el) el.scrollTop = top;
     });
   }
 
-  // Global handlers for drawer collapse/expand and download
   window.toggleJobDrawer = function(jobId) {
     const job = trackedJobs.get(jobId);
     if (job) {
@@ -490,7 +483,6 @@
         const data = await resp.json();
         const jobId = data.job_id;
 
-        // Register job in tracking map
         trackedJobs.set(jobId, {
           id: jobId,
           filename: pdf.name,
@@ -515,7 +507,6 @@
     });
   }
 
-  // Periodic UI refresh for elapsed time counters (only if running jobs exist)
   setInterval(() => {
     let hasRunning = false;
     for (const job of trackedJobs.values()) {
@@ -532,3 +523,4 @@
   refreshMetrics();
   setInterval(refreshMetrics, 3000);
 })();
+

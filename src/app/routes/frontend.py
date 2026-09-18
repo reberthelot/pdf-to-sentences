@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import os
 import time
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
-from fastapi import BackgroundTasks, FastAPI, File, UploadFile
+import httpx
+from fastapi import APIRouter, BackgroundTasks, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
-import backend
-
-from frontend_service import (
-    DEFAULT_SERVICE_URL,
-    Metrics,
+from src.app.config import settings
+from src.app.services.extraction_service import jobs_db
+from src.app.services.sentence_client import (
     call_sentence_service,
     get_job_status_service,
     inspect_pdf_service,
@@ -21,50 +17,43 @@ from frontend_service import (
     run_selftest,
     submit_job_service,
 )
+from src.app.utils.metrics import Metrics
 
-BASE_DIR = Path(__file__).resolve().parent
-HTML_TEMPLATE_PATH = BASE_DIR / "template" / "index.html"
-STATIC_DIR = BASE_DIR / "static"
+router = APIRouter(tags=["Frontend UI & Dashboard"])
 
 metrics = Metrics()
-app = FastAPI(
-    title="PDF → Sentences Frontend (DTU)",
-    description="Interactive UI and evaluation harness for PDF sentence extraction.",
-    version="1.1.0",
-)
-
-if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+recorded_jobs: Set[str] = set()
 
 
-@app.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse)
 async def index() -> str:
     """Render the single-page HTML application and reset operational metrics."""
     await metrics.reset()
     recorded_jobs.clear()
 
-    if not HTML_TEMPLATE_PATH.exists():
-        return "<h3>Error: template/index.html not found.</h3>"
+    template_file = settings.TEMPLATES_DIR / "index.html"
+    if not template_file.exists():
+        return "<h3>Error: templates/index.html not found.</h3>"
 
-    content = HTML_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return content.replace("{SERVICE_URL}", DEFAULT_SERVICE_URL)
+    content = template_file.read_text(encoding="utf-8")
+    return content.replace("{SERVICE_URL}", settings.SERVICE_URL)
 
 
-@app.post("/api/metrics/reset")
+@router.post("/api/metrics/reset")
 async def api_metrics_reset() -> Dict[str, Any]:
     """Explicitly reset operational metrics."""
     await metrics.reset()
     recorded_jobs.clear()
-    return await metrics.snapshot()
+    return await metrics.snapshot(settings.SERVICE_URL)
 
 
-@app.get("/api/metrics")
+@router.get("/api/metrics")
 async def api_metrics() -> Dict[str, Any]:
     """Return operational metrics snapshot."""
-    return await metrics.snapshot()
+    return await metrics.snapshot(settings.SERVICE_URL)
 
 
-@app.post("/api/inspect")
+@router.post("/api/inspect")
 async def api_inspect(pdf_file: UploadFile = File(...)) -> JSONResponse:
     """Inspect uploaded PDF to determine page count and estimated processing time."""
     try:
@@ -73,7 +62,7 @@ async def api_inspect(pdf_file: UploadFile = File(...)) -> JSONResponse:
             return JSONResponse(status_code=400, content={"error": "File is empty."})
 
         data = await inspect_pdf_service(
-            pdf_bytes, pdf_file.filename or "uploaded.pdf", DEFAULT_SERVICE_URL
+            pdf_bytes, pdf_file.filename or "uploaded.pdf", settings.SERVICE_URL
         )
         return JSONResponse(content=data)
     except Exception as exc:
@@ -82,7 +71,7 @@ async def api_inspect(pdf_file: UploadFile = File(...)) -> JSONResponse:
         )
 
 
-@app.post("/api/extract")
+@router.post("/api/extract")
 async def api_extract(pdf_file: UploadFile = File(...)) -> JSONResponse:
     """Handle PDF upload from UI and forward to sentence extraction backend."""
     t0 = time.perf_counter()
@@ -96,7 +85,7 @@ async def api_extract(pdf_file: UploadFile = File(...)) -> JSONResponse:
             return JSONResponse(status_code=400, content={"error": err_msg})
 
         sentences, latency_ms, meta = await call_sentence_service(
-            pdf_bytes, pdf_file.filename or "uploaded.pdf"
+            pdf_bytes, pdf_file.filename or "uploaded.pdf", settings.SERVICE_URL
         )
         await metrics.record_success(latency_ms=latency_ms)
         return JSONResponse(
@@ -109,7 +98,7 @@ async def api_extract(pdf_file: UploadFile = File(...)) -> JSONResponse:
         )
     except httpx.HTTPError as exc:
         latency_ms = (time.perf_counter() - t0) * 1000.0
-        msg = pedagogic_http_error(exc, DEFAULT_SERVICE_URL)
+        msg = pedagogic_http_error(exc, settings.SERVICE_URL)
         await metrics.record_failure(latency_ms=latency_ms, error=msg)
         return JSONResponse(
             status_code=502, content={"error": msg, "latency_ms": latency_ms}
@@ -127,29 +116,35 @@ async def api_extract(pdf_file: UploadFile = File(...)) -> JSONResponse:
         )
 
 
-@app.post("/api/selftest")
+@router.post("/api/selftest")
 async def api_selftest() -> Dict[str, Any]:
     """Run self-test validation on sample PDFs and record in operational metrics."""
-    return await run_selftest(service_url=DEFAULT_SERVICE_URL, metrics_tracker=metrics)
+    return await run_selftest(
+        service_url=settings.SERVICE_URL, metrics_tracker=metrics
+    )
 
 
-@app.post("/api/jobs/submit")
+@router.post("/api/jobs/submit")
 async def api_submit_job(
     background_tasks: BackgroundTasks,
     pdf_file: UploadFile = File(...),
 ) -> JSONResponse:
     """Submit PDF to backend asynchronous extraction job queue."""
     try:
-        # If running in unified single-process mode, call backend.submit_job directly
-        if "localhost:8000" in DEFAULT_SERVICE_URL or "127.0.0.1:8000" in DEFAULT_SERVICE_URL:
-            job_resp = await backend.submit_job(background_tasks, pdf_file)
+        from src.app.routes.api import submit_job as api_submit_direct
+
+        if (
+            "localhost:8000" in settings.SERVICE_URL
+            or "127.0.0.1:8000" in settings.SERVICE_URL
+        ):
+            job_resp = await api_submit_direct(background_tasks, pdf_file)
             return JSONResponse(content=job_resp.model_dump())
 
         pdf_bytes = await pdf_file.read()
         if not pdf_bytes:
             return JSONResponse(status_code=400, content={"error": "File is empty."})
         data = await submit_job_service(
-            pdf_bytes, pdf_file.filename or "uploaded.pdf", DEFAULT_SERVICE_URL
+            pdf_bytes, pdf_file.filename or "uploaded.pdf", settings.SERVICE_URL
         )
         return JSONResponse(content=data)
     except Exception as exc:
@@ -158,19 +153,18 @@ async def api_submit_job(
         )
 
 
-recorded_jobs: set[str] = set()
-
-
-@app.get("/api/jobs/{job_id}")
+@router.get("/api/jobs/{job_id}")
 async def api_job_status(job_id: str) -> JSONResponse:
     """Query progress and result for an asynchronous extraction job."""
     try:
-        if ("localhost:8000" in DEFAULT_SERVICE_URL or "127.0.0.1:8000" in DEFAULT_SERVICE_URL) and job_id in backend.jobs_db:
-            data = backend.jobs_db[job_id].model_dump()
+        if (
+            "localhost:8000" in settings.SERVICE_URL
+            or "127.0.0.1:8000" in settings.SERVICE_URL
+        ) and job_id in jobs_db:
+            data = jobs_db[job_id].model_dump()
         else:
-            data = await get_job_status_service(job_id, DEFAULT_SERVICE_URL)
+            data = await get_job_status_service(job_id, settings.SERVICE_URL)
 
-        # Once a job reaches terminal state, record it into operational metrics once
         status = data.get("status")
         if status in ("completed", "failed") and job_id not in recorded_jobs:
             recorded_jobs.add(job_id)
@@ -180,7 +174,9 @@ async def api_job_status(job_id: str) -> JSONResponse:
                 if latency_ms is None:
                     created = data.get("created_at")
                     updated = data.get("updated_at")
-                    latency_ms = (updated - created) * 1000.0 if created and updated else 0.0
+                    latency_ms = (
+                        (updated - created) * 1000.0 if created and updated else 0.0
+                    )
                 await metrics.record_success(latency_ms=float(latency_ms))
             elif status == "failed":
                 err = data.get("error") or "Background job extraction failed."
@@ -191,5 +187,4 @@ async def api_job_status(job_id: str) -> JSONResponse:
         return JSONResponse(
             status_code=500, content={"error": f"Failed to query job status: {exc}"}
         )
-
 
