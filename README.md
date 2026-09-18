@@ -118,14 +118,7 @@ pdf-to-sentences/
 
 ### Prerequisites
 - Python 3.10 or 3.11
-- Recommended virtual environment: **`MLvenv`**
-
-### 1. Setup Virtual Environment
 ```powershell
-# Create a dedicated venv
-python -m venv .venv
-.venv\Scripts\activate
-
 # Install requirements
 pip install -r requirements.txt
 ```
