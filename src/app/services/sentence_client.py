@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+
+from src.app.config import settings
+from src.app.utils.dataset import SELFTEST_DATASET
+from src.app.utils.metrics import Metrics
+
+
+def pedagogic_http_error(ex: Exception, service_url: str) -> str:
+    """Convert low-level exceptions into clear, educational explanations."""
+    if isinstance(ex, httpx.ConnectError):
+        return (
+            "Could not connect to the sentence-extraction service.\n"
+            f"- Configured service URL: {service_url}\n"
+            "- Is the service running, and is the URL correct?\n"
+            "- If running in Docker, check port mappings.\n"
+        )
+    if isinstance(ex, httpx.ReadTimeout):
+        return (
+            "The service did not respond before the timeout.\n"
+            f"- Current timeout: {settings.TIMEOUT_SECONDS} seconds\n"
+            "- Large PDFs can take time on CPU.\n"
+            "- Consider optimizing the service or increasing SERVICE_TIMEOUT_SECONDS.\n"
+        )
+    if isinstance(ex, httpx.RemoteProtocolError):
+        return (
+            "The connection was established, but the HTTP protocol exchange failed.\n"
+            "- Check the service logs.\n"
+        )
+    return (
+        "An unexpected error occurred while calling the service.\n"
+        f"- Error type: {type(ex).__name__}\n"
+        f"- Details: {ex}\n"
+    )
+
+
+async def call_sentence_service(
+    pdf_bytes: bytes,
+    filename: str,
+    service_url: str = settings.SERVICE_URL,
+) -> Tuple[List[str], float, Dict[str, Any]]:
+    """Call the sentence extraction backend service and return sentences, latency, and metadata."""
+    timeout = httpx.Timeout(
+        settings.TIMEOUT_SECONDS,
+        connect=settings.CONNECT_TIMEOUT_SECONDS,
+        read=settings.TIMEOUT_SECONDS,
+        write=settings.TIMEOUT_SECONDS,
+        pool=settings.TIMEOUT_SECONDS,
+    )
+
+    t0 = time.perf_counter()
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        files = {"pdf_file": (filename, pdf_bytes, "application/pdf")}
+        resp = await client.post(service_url, files=files)
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Service returned error HTTP status {resp.status_code}.\n"
+            f"Response body (first 2k chars): {resp.text[:2000]}"
+        )
+
+    data = resp.json()
+    if (
+        not isinstance(data, dict)
+        or "sentences" not in data
+        or not isinstance(data["sentences"], list)
+    ):
+        raise ValueError(
+            "Service response JSON did not match expected schema {'sentences': [...]}.\n"
+            f"Got: {data}"
+        )
+
+    sentences = [str(s) for s in data["sentences"]]
+    metadata = {
+        "method": data.get("method"),
+        "page_count": data.get("page_count"),
+        "processing_time_ms": data.get("processing_time_ms"),
+    }
+    return sentences, latency_ms, metadata
+
+
+async def inspect_pdf_service(
+    pdf_bytes: bytes,
+    filename: str,
+    service_url: str = settings.SERVICE_URL,
+) -> Dict[str, Any]:
+    """Inspect PDF to estimate page count and duration."""
+    inspect_url = service_url.replace("/v1/extract-sentences", "/v1/inspect-pdf")
+    timeout = httpx.Timeout(10.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        files = {"pdf_file": (filename, pdf_bytes, "application/pdf")}
+        resp = await client.post(inspect_url, files=files)
+
+    if resp.status_code == 200:
+        return resp.json()
+    raise ValueError(f"Inspect failed with status {resp.status_code}: {resp.text[:200]}")
+
+
+async def submit_job_service(
+    pdf_bytes: bytes,
+    filename: str,
+    service_url: str = settings.SERVICE_URL,
+) -> Dict[str, Any]:
+    """Submit a PDF file to the backend asynchronous job queue."""
+    submit_url = service_url.replace("/v1/extract-sentences", "/v1/jobs/submit")
+    timeout = httpx.Timeout(30.0, connect=settings.CONNECT_TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        files = {"pdf_file": (filename, pdf_bytes, "application/pdf")}
+        resp = await client.post(submit_url, files=files)
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Job submission failed with status {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+
+
+async def get_job_status_service(
+    job_id: str,
+    service_url: str = settings.SERVICE_URL,
+) -> Dict[str, Any]:
+    """Query progress status and result of a background job."""
+    status_url = service_url.replace("/v1/extract-sentences", f"/v1/jobs/{job_id}")
+    timeout = httpx.Timeout(10.0, connect=settings.CONNECT_TIMEOUT_SECONDS)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(status_url)
+
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Job status query failed with status {resp.status_code}: {resp.text[:500]}"
+        )
+    return resp.json()
+
+
+async def run_selftest(
+    service_url: str = settings.SERVICE_URL,
+    metrics_tracker: Optional[Metrics] = None,
+) -> Dict[str, Any]:
+    """Execute validation tests using reference sample PDFs and update operational metrics."""
+    results: List[Dict[str, Any]] = []
+    passed = 0
+
+    for item in SELFTEST_DATASET:
+        fname = item["filename"]
+        expected = item["sentences"]
+
+        path = settings.BASE_DIR / fname
+        if not path.exists():
+            path = settings.EXAMPLES_DIR / fname
+
+        if not path.exists():
+            if metrics_tracker:
+                await metrics_tracker.record_failure(
+                    latency_ms=None,
+                    error=f"Sample PDF '{fname}' not found in app or examples directory.",
+                )
+            results.append(
+                {
+                    "filename": fname,
+                    "ok": False,
+                    "error": f"Sample PDF '{fname}' not found in app or examples directory.",
+                    "missing_sentences": expected,
+                    "latency_ms": None,
+                    "num_returned_sentences": None,
+                }
+            )
+            continue
+
+        try:
+            pdf_bytes = path.read_bytes()
+            sentences, latency_ms, meta = await call_sentence_service(
+                pdf_bytes, fname, service_url=service_url
+            )
+
+            if metrics_tracker:
+                await metrics_tracker.record_success(latency_ms=latency_ms)
+
+            returned_set = set(sentences)
+            missing = [s for s in expected if s not in returned_set]
+
+            ok = len(missing) == 0
+            if ok:
+                passed += 1
+
+            results.append(
+                {
+                    "filename": fname,
+                    "ok": ok,
+                    "method": meta.get("method"),
+                    "page_count": meta.get("page_count"),
+                    "error": (
+                        None
+                        if ok
+                        else "Some expected sentences were not found in the output."
+                    ),
+                    "missing_sentences": missing,
+                    "latency_ms": latency_ms,
+                    "num_returned_sentences": len(sentences),
+                }
+            )
+        except Exception as ex:
+            err_msg = (
+                pedagogic_http_error(ex, service_url)
+                if isinstance(ex, httpx.HTTPError)
+                else str(ex)
+            )
+            if metrics_tracker:
+                await metrics_tracker.record_failure(
+                    latency_ms=None,
+                    error=err_msg,
+                )
+            results.append(
+                {
+                    "filename": fname,
+                    "ok": False,
+                    "error": err_msg,
+                    "missing_sentences": expected,
+                    "latency_ms": None,
+                    "num_returned_sentences": None,
+                }
+            )
+
+    return {
+        "service_url": service_url,
+        "passed": passed,
+        "total": len(SELFTEST_DATASET),
+        "results": results,
+    }
+

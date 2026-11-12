@@ -1,0 +1,296 @@
+# PDF to Sentences Extraction Service
+
+A high-performance, production-ready microservice for extracting, de-hyphenating, and segmenting natural text sentences from PDF documents.
+
+This project mirrors features a dual-engine pipeline capable of handling both digital vector PDFs and degraded historical scanned documents without requiring GPU/CUDA hardware.
+
+---
+
+## Architecture Overview
+
+```
+                      ┌──────────────────────────────────────┐
+                      │             Uploaded PDF             │
+                      └──────────────────┬───────────────────┘
+                                         │
+                         Has embedded digital text layer?
+                                         │
+                        ┌────────────────┴────────────────┐
+                       YES                               NO
+                        │                                 │
+              ┌─────────────────────┐           ┌────────────────────────┐
+              │   Fast-Path Engine  │           │    Vision OCR Engine   │
+              │     (pypdfium2)     │           │  (PP-OCRv5 Mobile ONNX)│
+              │   ~0.02s per page   │           │     ~12s per page      │
+              └──────────┬──────────┘           └──────────┬─────────────┘
+                         │                                 │
+                         │                       Baseline Line-Merging
+                         │                                 │
+                         └────────────────┬────────────────┘
+                                          │
+                            ┌───────────────────────────┐
+                            │   NLTK Sentence Tokenizer │
+                            └─────────────┬─────────────┘
+                                          │
+                              JSON Extracted Sentences
+```
+
+### 1. Dual-Engine Extraction Strategy
+- **Fast-Path Engine (`pypdfium2`)**: Inspects the document for an embedded vector text layer. If present, text is normalized (Unicode NFKC) and extracted in **~0.02s per page** (a 500x speedup over blind vision OCR).
+- **Vision OCR Engine (PP-OCRv5 Mobile + RapidOCR ONNX Runtime)**: When no digital text exists (e.g. scanned typewriter reports or photocopies), the system falls back to the **PP-OCRv5 Mobile** vision model running natively on **ONNX Runtime CPU**.
+  - **AVX2 SIMD CPU Acceleration**: Native C++ multithreading runs inference in ~11-12s per dense historical page without requiring GPU/CUDA hardware.
+  - **Geometric Baseline Line Merging**: Automatically clusters detected word bounding boxes sharing the same horizontal baseline ($Y_{\text{center}}$ within line-height tolerance) and sorts them left-to-right ($X_1 \to X_2$) before sentence tokenization.
+  - **Scan Noise Filtering**: DBNet box threshold set to `0.60` to discard paper grain, wrinkles, and ink bleed.
+
+---
+
+## Models Used Behind the Scenes & Why ONNX Runtime?
+
+### 1. Specific Model Architecture
+- **Text Detection**: **`PP-OCRv5_mobile_det`**
+  - Architecture: Real-time Differentiable Binarization (`DBNet`) paired with a lightweight MobileNet backbone.
+  - Role: Detects text bounding boxes at arbitrary angles, filtering out noise with a calibrated `box_thresh=0.60` and `unclip_ratio=1.5`.
+- **Text Recognition**: **`en_PP-OCRv5_mobile_rec`**
+  - Architecture: Lightweight `SVTR-LCNet` sequence recognition network.
+  - Dictionary: Complete 436-character CTC vocabulary (alphanumeric, punctuation, symbols, fractions, and diacritics) matching the 438 CTC output logits.
+- **Line Reconstruction**: An analytical geometric baseline-merging algorithm groups word boxes into cohesive horizontal lines prior to `nltk.sent_tokenize()`.
+
+### 2. Why ONNX Runtime for Lightweight & High-Performance Serving?
+1. **Zero Training Framework Overhead**:
+   - Standard deep learning training frameworks package autograd, graph builders, optimizers, distributed training stubs, and large GPU/CUDA runtime libraries, easily bloating container images to **> 2.5 GB**.
+   - For inference serving, none of this training machinery is needed. ONNX Runtime provides a dedicated, lightweight forward-pass evaluation engine (~20 MB) wrapped by `rapidocr-onnxruntime`.
+2. **Graph-Level Optimizations**:
+   - **Operator Fusion**: Fuses multiple adjacent operations (such as Convolution + Batch Normalization + ReLU) into single optimized compute kernels, eliminating redundant memory round-trips.
+   - **Constant Folding & Memory Reuse**: Static model weights are folded and intermediate tensor allocations are reused throughout the execution graph.
+3. **Native SIMD CPU Acceleration (AVX2 / FMA)**:
+   - Compiles down to native CPU vector instruction sets (AVX2, FMA, SSE).
+   - Bypasses Python interpreter locks and framework abstraction layers, cutting inference time on dense historical scans from ~88s down to **~11-12s per page**.
+   - Pairs with headless OpenCV (`opencv-python-headless`) to avoid heavy X11/OpenGL system libraries.
+
+
+### 3. Professional Project Structure
+```
+pdf-to-sentences/
+├── frontend/
+│   ├── static/
+│   │   ├── css/
+│   │   │   └── style.css          # DTU-themed CSS (variables, responsive layout, cards)
+│   │   └── js/
+│   │       └── app.js             # Asynchronous API requests, test runner & UI updates
+│   └── templates/
+│       └── index.html             # Semantic HTML5 template rendered for the browser
+├── src/
+│   └── app/
+│       ├── __init__.py            # Package init containing teacher assignment specifications
+│       ├── config.py              # Environment-driven configuration dataclass (Settings)
+│       ├── models.py              # Strict Pydantic v2 schemas for requests & responses
+│       ├── utils/
+│       │   ├── __init__.py
+│       │   ├── dataset.py         # Benchmark dataset (English sample PDFs & expected sentences)
+│       │   ├── metrics.py         # In-memory operational metrics collector
+│       │   └── normalization.py   # Text normalization and line clustering with doctests
+│       ├── services/
+│       │   ├── __init__.py
+│       │   ├── extraction_service.py # Fast-Path & PP-OCRv5 Mobile ONNX extraction engine
+│       │   └── sentence_client.py # Async HTTP client with pedagogic error diagnostics
+│       ├── routes/
+│       │   ├── __init__.py
+│       │   ├── frontend.py        # Frontend HTML view route ('/') and UI proxy endpoints
+│       │   └── api.py             # REST API routes (/v1/extract-sentences, /v1/jobs/...)
+│       └── main.py                # FastAPI application factory and entry point
+├── tests/
+│   ├── __init__.py
+│   ├── test_normalization.py     # Unit tests for text normalization and line clustering
+│   ├── test_metrics.py           # Unit tests for operational metrics tracker
+│   └── test_api.py               # Integration tests for FastAPI endpoints
+├── examples/                      # Reference PDF documents for testing & verification
+├── models/                        # Pre-cached PP-OCRv5 ONNX models & dictionary
+├── main.py                        # Root entry point wrapper
+├── requirements.txt              # Runtime and test dependencies (see pyproject.toml)
+├── Dockerfile                    # Container image definition with pre-cached ONNX models
+├── compose.yaml                  # Multi-container orchestration specification
+└── README.md                     # Documentation and usage guide
+```
+
+---
+
+## Installation & Setup
+
+### Prerequisites
+- Python 3.10 or 3.11
+```powershell
+# Install requirements
+pip install -r requirements.txt
+```
+
+---
+
+## How to Launch the Application
+
+### Option A: Unified Web Application (Recommended)
+Launches both the extraction backend and the frontend user interface on port 8000:
+```powershell
+python main.py
+```
+Or with Uvicorn CLI:
+```powershell
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+- **Web UI**: Open your browser at [http://localhost:8000](http://localhost:8000)
+- **Interactive Swagger Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **OpenAPI Schema**: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+
+---
+
+### Option B: Docker Container (Optimized < 450 MB)
+Build and run the lightweight self-contained container:
+```bash
+docker compose up --build
+```
+> **Note on Image Size**: The Docker image is optimized down from 2.56 GB to **< 450 MB** (~85% size reduction) by completely removing `paddlepaddle` (~1.5 GB) in favor of native `rapidocr-onnxruntime`, using headless OpenCV, pre-baking ONNX weights, and pruning non-essential caches.
+
+> **Runtime hardening**: the container runs as a **non-root** user (read-only access to the code, the NLTK data in `/usr/local/share/nltk_data`, and the pre-baked models), answers `GET /health` for the Docker `HEALTHCHECK`, and uses a **single uvicorn worker** on purpose (in-process job registry, metrics, and OCR engine — scale with replicas).
+
+
+The application will be accessible at [http://localhost:8000](http://localhost:8000).
+
+---
+
+## API Endpoints Reference
+
+### 1. Synchronous Extraction
+- **Endpoint**: `POST /v1/extract-sentences`
+- **Payload**: `multipart/form-data` with field `pdf_file`
+- **Response**:
+  ```json
+  {
+    "sentences": [
+      "Finn and Tyge were present.",
+      "The meeting adjourned at 14:00."
+    ],
+    "method": "fast_path",
+    "page_count": 1,
+    "processing_time_ms": 42.5
+  }
+  ```
+
+### 2. PDF Pre-Inspection & Duration Estimation
+- **Endpoint**: `POST /v1/inspect-pdf`
+- **Payload**: `multipart/form-data` with field `pdf_file`
+- **Response**:
+  ```json
+  {
+    "page_count": 4,
+    "has_text_layer": false,
+    "recommended_method": "rapidocr_onnx",
+    "estimated_seconds": 48.0
+  }
+  ```
+
+### 3. Asynchronous Job Processing (For Large Scans & Non-Blocking UI)
+For multi-page scanned documents or background batching, avoid HTTP client timeouts (504 Gateway Timeout) by using background job execution:
+
+#### Submit Job
+- **Endpoint**: `POST /v1/jobs/submit` (or via frontend proxy `POST /api/jobs/submit`)
+- **Payload**: `multipart/form-data` with field `pdf_file`
+- **Response**:
+  ```json
+  {
+    "job_id": "cf525c49-a099-4738-9708-d5dde3fedd25",
+    "status": "pending",
+    "total_pages": 13,
+    "estimated_seconds": 0.05
+  }
+  ```
+
+#### Query Job Status & Progress
+- **Endpoint**: `GET /v1/jobs/{job_id}` (or via frontend proxy `GET /api/jobs/{job_id}`)
+- **Response (Processing)**:
+  ```json
+  {
+    "job_id": "cf525c49-a099-4738-9708-d5dde3fedd25",
+    "filename": "document.pdf",
+    "status": "processing",
+    "progress": 0.40,
+    "current_page": 2,
+    "total_pages": 5,
+    "message": "Processing page 2 of 5 with RapidOCR ONNX...",
+    "created_at": 1789145728.16,
+    "updated_at": 1789145740.50,
+    "result": null,
+    "error": null
+  }
+  ```
+- **Response (Completed)**:
+  ```json
+  {
+    "job_id": "cf525c49-a099-4738-9708-d5dde3fedd25",
+    "filename": "document.pdf",
+    "status": "completed",
+    "progress": 1.0,
+    "current_page": 5,
+    "total_pages": 5,
+    "message": "Extraction completed successfully via PP-OCRv5 Mobile RapidOCR ONNX.",
+    "result": {
+      "sentences": ["First extracted sentence.", "Second sentence."],
+      "method": "rapidocr_onnx",
+      "page_count": 5,
+      "processing_time_ms": 46290.9
+    },
+    "created_at": 1789145728.16,
+    "updated_at": 1789145774.45,
+    "error": null
+  }
+  ```
+
+---
+
+## Interactive Web Dashboard Features
+
+The web frontend (`http://localhost:8000`) provides an integrated dual-mode workspace:
+
+1. **Synchronous Extraction**: Click **Extract sentences** for instant digital extraction or single-page scans with live stopwatch and preview.
+2. **Asynchronous Jobs Table**: Click **Extract sentences (asynchrone)** to offload tasks to the background worker.
+   - **Compact Single-Row Table**: Displays document name, short Job ID, frozen elapsed duration, page count (`current / total`), status pill, progress bar percentage, and OCR engine.
+   - **Color-Coded Status**: Green for completed, amber/orange for pending/processing, and red for failed jobs.
+   - **Expandable Drawer**: Right-aligned `View ▼` / `Hide ▲` toggle reveals the complete Job ID, status log, latency, and full extracted sentences with a one-click `.txt` download button.
+   - **Stable Scrolling**: Scroll position is preserved inside text drawers during background polling, preventing abrupt page jumps.
+3. **Automated Self-Test**: Validates baseline sentence segmentation against reference benchmark PDFs directly from the UI.
+4. **Operational KPIs**: Live request counters, success/failure ratios, and average latency tracking.
+
+---
+
+## Configuration
+
+Settings are read from environment variables (or an optional `.env` file at the project root) through `pydantic-settings`; legacy container env names (`SENTENCE_SERVICE_URL`, `SERVICE_TIMEOUT_SECONDS`, `SERVICE_CONNECT_TIMEOUT_SECONDS`) are preserved via aliases.
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `HOST` / `PORT` | `0.0.0.0` / `8000` | Bind address of the API server |
+| `SENTENCE_SERVICE_URL` | `http://localhost:8000/v1/extract-sentences` | Target endpoint when frontend/backend run split |
+| `SERVICE_TIMEOUT_SECONDS` | `180.0` | Total timeout for sentence-service calls |
+| `SERVICE_CONNECT_TIMEOUT_SECONDS` | `10.0` | Connection timeout for sentence-service calls |
+| `MODELS_DIR` | `models/` | Directory holding the downloaded OCR models |
+| `NLTK_LANGUAGE` | `english` | Punkt language for `nltk.sent_tokenize` (`english`, `danish`) |
+| `LOG_LEVEL` | `INFO` | Root log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`, case-insensitive) |
+
+## Running Automated Tests
+
+Run the full automated test harness with `pytest`:
+```powershell
+pytest tests/ -v
+```
+
+Dependencies are pinned with `uv` (`pyproject.toml` + `uv.lock`). After a dependency change, refresh the lock and the Docker build file:
+
+```bash
+uv lock
+uv export --no-hashes --no-dev -o requirements.txt
+```
+
+### Tests Covered
+1. **`test_extract_sentences_studyboard`**: Validates instantaneous Fast-Path extraction on digital PDF (`studyboard.pdf`).
+2. **`test_extract_sentences_assignment_spec`**: Validates sentence segmentation and accuracy against assignment benchmark (`2303.15133.pdf`).
+3. **`test_async_job_lifecycle`**: Validates asynchronous submission (`/v1/jobs/submit`) and polling resolution (`/v1/jobs/{job_id}`).
+4. **UI Self-Test**: Click the **Run self-test** button in the web dashboard at `http://localhost:8000` to execute live validation directly from the browser.
+

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF → Sentences (DTU Frontend)</title>
+  <link rel="stylesheet" href="static/css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>PDF → Sentences (DTU Frontend Test App)</h1>
+    <div class="sub">High-performance extraction (Fast-Path vector text &amp; ONNX-accelerated PP-OCRv5 Mobile fallback) at <span class="pill" id="svcUrl">{SERVICE_URL}</span></div>
+  </header>
+
+  <main>
+    <div class="grid">
+      <section class="card">
+        <h2>1) Upload a PDF and extract sentences</h2>
+        <div class="meta">
+          Upload a PDF for synchronous extraction or dispatch as an asynchronous background job with live progress.
+        </div>
+
+        <form id="uploadForm">
+          <div class="row">
+            <input id="pdfFile" type="file" accept="application/pdf" required />
+            <button id="extractBtn" class="btn" type="submit">Extract sentences</button>
+            <button id="extractAsyncBtn" class="btn" type="button" style="background:#00558f;">Extract sentences (asynchrone)</button>
+            <button id="downloadBtn" class="btn secondary" type="button" disabled>Download all as .txt</button>
+          </div>
+          
+          <div class="row" id="fileInfoRow" style="display: none;">
+            <span class="pill">Pages: <b id="pageCount">—</b></span>
+            <span class="pill">Layer: <b id="docType">—</b></span>
+            <span class="pill">Estimated time: <b id="estTime">—</b></span>
+          </div>
+
+          <div class="row">
+            <input id="filterBox" type="text" placeholder="Optional: filter preview by substring (client-side)" style="min-width: 260px;" />
+            <span class="pill">Preview limit: <b id="previewLimit">200</b></span>
+            <span class="pill">Latency: <b id="latency">—</b></span>
+            <span class="pill">Engine: <b id="engineUsed">—</b></span>
+            <span class="pill">Returned: <b id="returnedCount">—</b></span>
+          </div>
+        </form>
+
+        <details open>
+          <summary>Output preview (synchronous)</summary>
+          <div class="small">Shows the first N sentences (after optional filter). Use the download button to get all sentences.</div>
+          <pre id="output">No results yet.</pre>
+        </details>
+
+        <details>
+          <summary>Troubleshooting &amp; Engine tips</summary>
+          <pre id="tips">• Configured URL: {SERVICE_URL}
+• Fast-Path (vector text layer): Instantaneous (~0.02s/page).
+• PP-OCRv5 Mobile ONNX: Accelerated CPU vision for scanned documents (~12-15s/page on CPU).
+• Line baseline merging ensures coherent reading order for typewriter and scanned texts.
+• Asynchronous Jobs avoid HTTP timeouts on large multi-page scans.</pre>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>2) Automatic self-test (sample PDFs)</h2>
+        <div class="meta">
+          Tests whether specific sentences are present in the service output for PDFs located next to this app.
+        </div>
+
+        <div class="row">
+          <button id="selftestBtn" class="btn" type="button">Run self-test</button>
+          <span class="pill">Status: <b id="selftestStatus">not run</b></span>
+        </div>
+
+        <pre id="selftestOut">Self-test results will appear here.</pre>
+
+        <h2 style="margin-top:14px;">3) Operational metrics</h2>
+        <div class="meta">In-memory performance counters (reset on page reload).</div>
+
+        <div class="kpi">
+          <div class="box"><div class="label">Total requests</div><div class="value" id="m_total">—</div></div>
+          <div class="box"><div class="label">Successful</div><div class="value" id="m_ok">—</div></div>
+          <div class="box"><div class="label">Failed</div><div class="value" id="m_fail">—</div></div>
+          <div class="box"><div class="label">Avg latency</div><div class="value" id="m_avg">—</div></div>
+          <div class="box"><div class="label">Last latency</div><div class="value" id="m_last">—</div></div>
+          <div class="box"><div class="label">Last error</div><div class="value" id="m_err" style="font-size:12px;">—</div></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Asynchronous Background Jobs Interface -->
+    <section class="card" style="margin-top: 16px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2 style="margin:0;">4) Asynchronous Jobs</h2>
+        <span class="pill" id="jobsCountBadge">0 job(s)</span>
+      </div>
+      <div class="meta" style="margin-top: 4px;">
+        Background extraction tasks executed asynchronously with live polling. Click the details button on the right to inspect sentences or error logs.
+      </div>
+
+      <div id="jobsContainer" class="jobs-table-container">
+        <div class="small" id="noJobsMsg" style="padding: 12px; color: var(--muted); text-align: center; background: white; border: 1px dashed var(--border); border-radius: 8px;">
+          No asynchronous jobs submitted yet. Click <b>"Extract sentences (asynchrone)"</b> to start one.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="static/js/app.js"></script>
+</body>
+</html>
+

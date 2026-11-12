@@ -1,0 +1,18 @@
+services:
+  pdf-to-sentences:
+    image: pdf-to-sentences
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    ports:
+      - "8000:8000"
+    # Liveness probe: mirrors the Dockerfile HEALTHCHECK (GET /health).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # The lifespan initializes NLTK and the OCR engine before serving.
+      start_period: 45s
+    # Single uvicorn worker on purpose: in-process state (job registry,
+    # metrics, OCR engine) must not be shared across forked workers.
